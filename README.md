@@ -31,6 +31,7 @@ pnpm test                    # Run the unit tests and experiments.
 pnpm typecheck               # Type-check the TypeScript packages.
 pnpm host:checkout           # Clone and select the pinned EmDash commit into `.upstream/emdash` (ignored).
 pnpm host:qualify-delivery   # Build and run a disposable Astro fixture that checks stable direct, transformed and static image delivery.
+pnpm host:qualify-writers    # Run the pinned EmDash editor handlers against a prototype revision fence on real SQLite connections.
 ```
 
 Run `pnpm host:checkout` before the qualification commands.

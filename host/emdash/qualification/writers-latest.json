@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-10-01T23:52:12.129Z",
+  "targetCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+  "node": "v22.23.2",
+  "profile": "node-sqlite-local-writer-participation-prototype",
+  "fixtureOnly": true,
+  "routeSourceDigests": {
+    "packages/core/src/astro/routes/api/media/[id]/replace.ts": "7c80b3662ebca1ee9faaff30aa7b279ee6fd2b888f6ddafbab5681a19c675c78",
+    "packages/core/src/astro/routes/api/media/[id].ts": "4ce8a3348ba23c2a2d1990ed916d6c15db914f08d6fe3788eac288786927c2d5"
+  },
+  "tests": [
+    "pinned editor replace wins over stale optimization and preserves a later caption/focal edit",
+    "pinned editor replace reports conflict when optimization publishes after the editor source read",
+    "pinned editor deletion fences stale optimization and restore and retains reader objects",
+    "pinned editor deletion conflicts if another writer publishes after its source read",
+    "pinned editor replacement cannot resurrect a deletion during its source read",
+    "restore creates a new source revision even when it returns to identical original bytes",
+    "unparticipating SQL writers cannot change byte pointers or hard-delete managed media",
+    "pinned route permission and ownership checks reject callers before staging bytes",
+    "concurrent editor requests keep their own snapshots and cannot overwrite a winner",
+    "a rejected staged revision does not leave the writer transaction or SQL guard open"
+  ],
+  "passed": 10,
+  "failed": 0,
+  "scope": "Pinned editor handlers invoked with request-scoped prototype host callbacks, two real SQLite connections, decoded fixture PNGs and immutable objects.",
+  "limits": "No full EmDash runtime, deployed host patch, sandbox bridge, CSRF middleware, durable receipt or crash recovery qualification."
+}
