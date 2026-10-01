@@ -1,0 +1,24 @@
+{
+  "name": "verco-plugins",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.18.3",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test packages/media-host-adapter/test/*.test.mjs experiments/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "host:checkout": "node scripts/checkout-emdash.mjs",
+    "host:qualify-delivery": "node scripts/qualify-media-delivery.mjs"
+  },
+  "devDependencies": {
+    "@astrojs/node": "11.1.5",
+    "astro": "7.3.2",
+    "mime": "4.1.0",
+    "sharp": "0.35.4",
+    "typescript": "5.9.3",
+    "zod": "4.5.4"
+  }
+}

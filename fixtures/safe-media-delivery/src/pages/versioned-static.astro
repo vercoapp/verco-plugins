@@ -1,0 +1,13 @@
+---
+import { Image } from 'astro:assets';
+import { getFixtureBuildRevision } from '../storage.mjs';
+export const prerender = true;
+const origin = process.env.VERCO_MEDIA_FIXTURE_ORIGIN;
+if (!origin) throw new Error('VERCO_MEDIA_FIXTURE_ORIGIN is required to build the static fixture.');
+const source = `${origin}/_emdash/api/media/file/fixture.png?rev=${getFixtureBuildRevision('fixture.png')}`;
+---
+<!doctype html>
+<html lang="en">
+  <head><title>Revision-aware static safe media fixture</title></head>
+  <body><Image src={source} width={8} height={8} format="png" alt="Revision-aware build-time fixture image" /></body>
+</html>

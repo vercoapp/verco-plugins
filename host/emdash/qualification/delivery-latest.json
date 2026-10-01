@@ -1,0 +1,108 @@
+{
+  "timestamp": "2026-10-01T22:44:53.405Z",
+  "targetCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+  "node": "v22.23.2",
+  "tooling": {
+    "astro": "7.3.2",
+    "@astrojs/node": "11.1.5",
+    "sharp": "0.35.4",
+    "mime": "4.1.0",
+    "zod": "4.5.4"
+  },
+  "profile": "node-sqlite-local-host-resolver-prototype",
+  "fixtureOnly": true,
+  "directAndTransformSwitch": "next request resolves the selected complete revision",
+  "staticRebuild": "required after replacement and restore; render remote source with the current revision digest",
+  "unversionedStatic": "rebuild refreshes bytes but reuses a year-long immutable URL; unsupported without cache invalidation",
+  "revisionAwareStatic": "warm-cache rebuild creates a new asset URL after replacement and restores original pixels after restore",
+  "privateAndObjectUrls": "404",
+  "deletion": "direct and transformed URLs return 404",
+  "measurements": [
+    {
+      "runtime": "development",
+      "path": "/_emdash/api/media/file/fixture.png",
+      "revision": "original",
+      "elapsedMs": 117.75
+    },
+    {
+      "runtime": "development",
+      "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Ffixture.png&w=8&h=8&f=png",
+      "revision": "original",
+      "elapsedMs": 91.2
+    },
+    {
+      "runtime": "production",
+      "path": "/_emdash/api/media/file/fixture.png",
+      "revision": "original",
+      "elapsedMs": 20.21
+    },
+    {
+      "runtime": "production",
+      "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Ffixture.png&w=8&h=8&f=png",
+      "revision": "original",
+      "elapsedMs": 7.12
+    },
+    {
+      "runtime": "production",
+      "path": "/_emdash/api/media/file/fixture.png",
+      "revision": "candidate",
+      "elapsedMs": 2.88
+    },
+    {
+      "runtime": "production",
+      "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Ffixture.png&w=8&h=8&f=png",
+      "revision": "candidate",
+      "elapsedMs": 2.8
+    },
+    {
+      "runtime": "production",
+      "path": "/_emdash/api/media/file/fixture.png",
+      "revision": "original",
+      "elapsedMs": 8.33
+    },
+    {
+      "runtime": "production",
+      "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Ffixture.png&w=8&h=8&f=png",
+      "revision": "original",
+      "elapsedMs": 6.89
+    }
+  ],
+  "generatedStaticSources": {
+    "unversionedOriginal": "/_astro/fixture_1nYA6K.png",
+    "unversionedRebuilt": "/_astro/fixture_1nYA6K.png",
+    "versionedOriginal": "/_astro/fixture_Z2x5kF9.png",
+    "versionedRebuilt": "/_astro/fixture_Z5yRGL.png",
+    "versionedRestored": "/_astro/fixture_Z2x5kF9.png"
+  },
+  "sharp": {
+    "aom": "3.15.0",
+    "archive": "3.8.9",
+    "cairo": "1.18.4",
+    "cgif": "0.5.3",
+    "exif": "0.6.26",
+    "expat": "2.8.3",
+    "ffi": "3.8.0",
+    "fontconfig": "2.18.3",
+    "freetype": "2.14.3",
+    "fribidi": "1.0.16",
+    "glib": "2.89.4",
+    "harfbuzz": "14.3.1",
+    "heif": "1.23.2",
+    "highway": "1.4.0",
+    "imagequant": "2.4.1",
+    "lcms": "2.19.1",
+    "mozjpeg": "0826579",
+    "pango": "1.58.2",
+    "pixman": "0.46.4",
+    "png": "1.6.58",
+    "proxy-libintl": "0.5",
+    "rsvg": "2.62.91",
+    "tiff": "4.7.2",
+    "uhdr": "2.0.2",
+    "vips": "8.18.6",
+    "webp": "1.6.0",
+    "xml2": "2.15.3",
+    "zlib-ng": "2.3.3",
+    "sharp": "0.35.4"
+  }
+}

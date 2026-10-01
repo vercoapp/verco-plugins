@@ -1,0 +1,12 @@
+---
+import { Image } from 'astro:assets';
+export const prerender = true;
+const origin = process.env.VERCO_MEDIA_FIXTURE_ORIGIN;
+if (!origin) throw new Error('VERCO_MEDIA_FIXTURE_ORIGIN is required to build the static fixture.');
+const source = `${origin}/_emdash/api/media/file/fixture.png`;
+---
+<!doctype html>
+<html lang="en">
+  <head><title>Static safe media fixture</title></head>
+  <body><Image src={source} width={8} height={8} format="png" alt="Build-time fixture image" /></body>
+</html>

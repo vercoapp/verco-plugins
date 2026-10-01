@@ -1,0 +1,7 @@
+.upstream/
+node_modules/
+.qualification-runs/
+
+# Planning and design documents are kept locally
+/docs/
+/openspec/

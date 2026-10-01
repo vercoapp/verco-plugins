@@ -1,0 +1,13 @@
+---
+const stableUrl = '/_emdash/api/media/file/fixture.png';
+const transformedUrl = `/_image?href=${encodeURIComponent(stableUrl)}&w=8&h=8&f=png`;
+---
+<!doctype html>
+<html lang="en">
+  <head><title>Safe media delivery fixture</title></head>
+  <body>
+    <img id="direct" src={stableUrl} width="16" height="16" alt="Direct fixture image" />
+    <img id="transformed" src={transformedUrl} width="8" height="8" alt="Transformed fixture image" />
+    <a href="/static/">Prerendered fixture</a>
+  </body>
+</html>
