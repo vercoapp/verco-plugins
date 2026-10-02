@@ -1,0 +1,275 @@
+diff --git a/packages/core/src/media/safe/sharp-child-decoder.ts b/packages/core/src/media/safe/sharp-child-decoder.ts
+index e245ba9835e6eda67c0e0e3dbd4661f5218a1efe..af29f45e62eb9939bc29d4993264fbd2f8ee156e 100644
+--- a/packages/core/src/media/safe/sharp-child-decoder.ts
++++ b/packages/core/src/media/safe/sharp-child-decoder.ts
+@@ -21,10 +21,12 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
+ // Runs in the child. Pixels are decoded sequentially and discarded by stats().
+ const CHILD_SOURCE = `
+ const { sharp: sharpUrl, maxPixels } = JSON.parse(process.argv[1]);
++process.on("disconnect", () => process.exit(1));
++if (!process.connected) process.exit(1);
+ const chunks = [];
+ for await (const chunk of process.stdin) chunks.push(chunk);
+ const bytes = Buffer.concat(chunks);
+-const reply = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
++const reply = (value) => new Promise(() => process.stdout.write(JSON.stringify(value) + "\\n", () => process.exit(0)));
+ const { default: sharp } = await import(sharpUrl);
+ sharp.cache(false);
+ const options = { limitInputPixels: maxPixels, failOn: "warning", sequentialRead: true };
+@@ -32,16 +34,14 @@ let metadata;
+ try {
+   metadata = await sharp(bytes, options).metadata();
+ } catch (error) {
+-  reply({ ok: false, code: /pixel limit/.test(String(error && error.message)) ? "TOO_MANY_PIXELS" : "UNDECODABLE" });
+-  process.exit(0);
++  await reply({ ok: false, code: /pixel limit/.test(String(error && error.message)) ? "TOO_MANY_PIXELS" : "UNDECODABLE" });
+ }
+ try {
+   await sharp(bytes, options).stats();
+ } catch (error) {
+-  reply({ ok: false, code: /pixel limit/.test(String(error && error.message)) ? "TOO_MANY_PIXELS" : "CORRUPT" });
+-  process.exit(0);
++  await reply({ ok: false, code: /pixel limit/.test(String(error && error.message)) ? "TOO_MANY_PIXELS" : "CORRUPT" });
+ }
+-reply({ ok: true, format: metadata.format, width: metadata.width, height: metadata.height, frames: metadata.pages ?? 1 });
++await reply({ ok: true, format: metadata.format, width: metadata.width, height: metadata.height, frames: metadata.pages ?? 1 });
+ `;
+ 
+ export interface SharpChildDecoderOptions {
+@@ -110,11 +110,12 @@ export function createSharpChildDecoder(options: SharpChildDecoderOptions = {}):
+ 						CHILD_SOURCE,
+ 						JSON.stringify({ sharp: pathToFileURL(sharpPath).href, maxPixels: request.maxPixels }),
+ 					],
+-					{ cwd: tmpdir(), env: {}, stdio: ["pipe", "pipe", "ignore"] },
++					{ cwd: tmpdir(), env: {}, stdio: ["pipe", "pipe", "ignore", "ipc"] },
+ 				);
+-				options.onSpawn?.(child.pid);
+ 				let output = "";
+ 				let settled = false;
++				let timedOut = false;
++				let spawnCallbackError: unknown;
+ 				const finish = (action: () => void) => {
+ 					if (settled) return;
+ 					settled = true;
+@@ -122,12 +123,8 @@ export function createSharpChildDecoder(options: SharpChildDecoderOptions = {}):
+ 					action();
+ 				};
+ 				const timer = setTimeout(() => {
++					timedOut = true;
+ 					child.kill("SIGKILL");
+-					finish(() =>
+-						reject(
+-							new ImageDecodeError("DECODE_TIMEOUT", "Image validation exceeded its time limit"),
+-						),
+-					);
+ 				}, request.timeoutMs);
+ 
+ 				child.stdout.on("data", (chunk: Buffer) => {
+@@ -144,6 +141,16 @@ export function createSharpChildDecoder(options: SharpChildDecoderOptions = {}):
+ 				);
+ 				child.on("close", (code, signal) =>
+ 					finish(() => {
++						if (spawnCallbackError) {
++							reject(spawnCallbackError);
++							return;
++						}
++						if (timedOut) {
++							reject(
++								new ImageDecodeError("DECODE_TIMEOUT", "Image validation exceeded its time limit"),
++							);
++							return;
++						}
+ 						if (code !== 0 || signal) {
+ 							reject(
+ 								new ImageDecodeError("DECODER_CRASHED", "The image decoder stopped unexpectedly"),
+@@ -160,6 +167,12 @@ export function createSharpChildDecoder(options: SharpChildDecoderOptions = {}):
+ 				// A child that exits before reading stdin raises EPIPE; its close event reports the outcome.
+ 				child.stdin.on("error", () => undefined);
+ 				child.stdin.end(bytes);
++				try {
++					options.onSpawn?.(child.pid);
++				} catch (error) {
++					spawnCallbackError = error;
++					child.kill("SIGKILL");
++				}
+ 			});
+ 		},
+ 	};
+diff --git a/packages/core/tests/unit/media/safe/decoder-lifecycle.test.ts b/packages/core/tests/unit/media/safe/decoder-lifecycle.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8893964bcb652eeacfb4b635a72849f2c0152ad7
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/decoder-lifecycle.test.ts
+@@ -0,0 +1,111 @@
++import { spawn } from "node:child_process";
++import { once } from "node:events";
++import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import ts from "typescript";
++import { expect, it, vi } from "vitest";
++
++import { createSharpChildDecoder } from "../../../../src/media/safe/sharp-child-decoder.js";
++
++const request = { format: "png" as const, maxPixels: 100, timeoutMs: 10_000 };
++
++async function stop(pid: number | undefined) {
++	if (pid === undefined) return;
++	try {
++		process.kill(pid, "SIGKILL");
++	} catch (error) {
++		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
++	}
++	await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(/ESRCH/), { timeout: 2000 });
++}
++
++it("reaps the decoder before reporting a timeout", async () => {
++	let pid: number | undefined;
++	try {
++		const decoder = createSharpChildDecoder({
++			onSpawn: (value) => {
++				pid = value;
++			},
++		});
++		await expect(
++			decoder.decode(new Uint8Array(), { ...request, timeoutMs: 1 }),
++		).rejects.toMatchObject({ code: "DECODE_TIMEOUT" });
++		expect(pid).toBeTypeOf("number");
++		expect(() => process.kill(pid!, 0)).toThrow(/ESRCH/);
++	} finally {
++		await stop(pid);
++	}
++});
++
++it("reaps the decoder if the spawn observer throws", async () => {
++	let pid: number | undefined;
++	const failure = new Error("observer failed");
++	try {
++		const decoder = createSharpChildDecoder({
++			onSpawn: (value) => {
++				pid = value;
++				throw failure;
++			},
++		});
++		await expect(decoder.decode(new Uint8Array(), request)).rejects.toBe(failure);
++		expect(() => process.kill(pid!, 0)).toThrow(/ESRCH/);
++	} finally {
++		await stop(pid);
++	}
++});
++
++it("exits a hung decoder when its parent is killed", async () => {
++	const directory = await mkdtemp(join(tmpdir(), "emdash-decoder-lifecycle-"));
++	let pid: number | undefined;
++	let parent: ReturnType<typeof spawn> | undefined;
++	try {
++		for (const name of ["decoder", "sharp-child-decoder"]) {
++			const source = await readFile(
++				new URL(`../../../../src/media/safe/${name}.ts`, import.meta.url),
++				"utf8",
++			);
++			await writeFile(
++				join(directory, `${name}.js`),
++				ts.transpileModule(source, {
++					compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2023 },
++				}).outputText,
++			);
++		}
++		await writeFile(join(directory, "package.json"), '{"type":"module"}');
++		const ready = join(directory, "ready");
++		const stub = join(directory, "sharp.mjs");
++		await writeFile(
++			stub,
++			`import { writeFileSync } from "node:fs";
++setTimeout(() => process.exit(1), 5000);
++const hang = () => { writeFileSync(${JSON.stringify(ready)}, "ready"); return new Promise(() => setInterval(() => {}, 1000)); };
++export default Object.assign(() => ({ metadata: hang, stats: hang }), { cache() {} });`,
++		);
++		const launcher = join(directory, "parent.mjs");
++		await writeFile(
++			launcher,
++			`import { createSharpChildDecoder } from "./sharp-child-decoder.js";
++const decoder = createSharpChildDecoder({ sharpPath: ${JSON.stringify(stub)}, onSpawn: (pid) => process.send(pid) });
++await decoder.decode(new Uint8Array([1]), ${JSON.stringify(request)});`,
++		);
++		parent = spawn(process.execPath, [launcher], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
++		const closed = once(parent, "close");
++		[pid] = (await once(parent, "message", { signal: AbortSignal.timeout(2000) })) as [number];
++		await vi.waitFor(async () => expect(await readFile(ready, "utf8")).toBe("ready"), {
++			timeout: 2000,
++		});
++		parent.kill("SIGKILL");
++		await closed;
++		await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(/ESRCH/), { timeout: 2000 });
++	} finally {
++		if (parent && parent.exitCode === null && parent.signalCode === null) {
++			const closed = once(parent, "close");
++			parent.kill("SIGKILL");
++			await closed;
++		}
++		await stop(pid);
++		await rm(directory, { recursive: true, force: true });
++	}
++});
+diff --git a/packages/core/tests/unit/media/safe/output-validation.test.ts b/packages/core/tests/unit/media/safe/output-validation.test.ts
+index 80b838df05f19f2784c815f7c5cf57b5987082c8..8a46342624effe5d758732194542580f9bf9cd4e 100644
+--- a/packages/core/tests/unit/media/safe/output-validation.test.ts
++++ b/packages/core/tests/unit/media/safe/output-validation.test.ts
+@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ 
+ import sharp from "sharp";
+-import { describe, expect, it, vi } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+ import { createDecodeAdmission } from "../../../../src/media/safe/admission.js";
+ import type { FullImageDecoder } from "../../../../src/media/safe/decoder.js";
+@@ -24,7 +24,22 @@ import {
+ 	withAnimationControl,
+ } from "./output-fixtures.js";
+ 
+-const childDecoder = createSharpChildDecoder();
++const children = new Set<number>();
++const trackChild = (pid: number | undefined) => {
++	if (pid !== undefined) children.add(pid);
++};
++afterEach(async () => {
++	for (const pid of children) {
++		try {
++			process.kill(pid, "SIGKILL");
++		} catch (error) {
++			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
++		}
++		await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(/ESRCH/));
++	}
++	children.clear();
++});
++const childDecoder = createSharpChildDecoder({ onSpawn: trackChild });
+ const source = (
+ 	mimeType: string,
+ 	width: number | null = SOURCE.width,
+@@ -437,6 +452,7 @@ describe("decoder limits and admission", () => {
+ 		const decoder = createSharpChildDecoder({
+ 			onSpawn: (value) => {
+ 				pid = value;
++				trackChild(value);
+ 			},
+ 		});
+ 		const started = Date.now();
+@@ -455,13 +471,14 @@ describe("decoder limits and admission", () => {
+ 			// A sharp stand-in whose metadata never resolves: only a kill can end this decode.
+ 			await writeFile(
+ 				stub,
+-				"const hang = () => new Promise(() => setInterval(() => {}, 1000));\nexport default Object.assign(() => ({ metadata: hang, stats: hang }), { cache() {} });\n",
++				"setTimeout(() => process.exit(1), 4000); const hang = () => new Promise(() => setInterval(() => {}, 1000));\nexport default Object.assign(() => ({ metadata: hang, stats: hang }), { cache() {} });\n",
+ 			);
+ 			let pid: number | undefined;
+ 			const decoder = createSharpChildDecoder({
+ 				sharpPath: stub,
+ 				onSpawn: (value) => {
+ 					pid = value;
++					trackChild(value);
+ 				},
+ 			});
+ 			const { png } = await stills();
