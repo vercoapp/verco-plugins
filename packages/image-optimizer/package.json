@@ -15,7 +15,7 @@
   "main": "dist/native.mjs",
   "exports": {
     ".": {
-      "types": "./dist/types/native.d.ts",
+      "types": "./dist/native.d.ts",
       "import": "./dist/native.mjs"
     },
     "./sandbox": "./dist/plugin.mjs",
@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "validate": "emdash-plugin validate",
-    "build": "emdash-plugin build && vite build -c vite.native.config.ts && tsc -p tsconfig.native.json",
+    "build": "emdash-plugin build && vite build -c vite.native.config.ts && tsc -p tsconfig.native.json && mv dist/types/native.d.ts dist/native.d.ts && rm -r dist/types",
     "dev": "emdash-plugin dev",
     "typecheck": "tsc --noEmit",
     "test": "emdash-plugin validate && vitest run",

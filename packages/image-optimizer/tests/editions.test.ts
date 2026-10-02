@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createPluginRuntimeTestHost, createPluginTestHost, type PluginRuntimeTestHost } from '@emdash-cms/plugin-test';
 import type { PluginUiContext } from 'emdash/plugin';
@@ -177,12 +177,20 @@ describe('the editions agree', () => {
 });
 
 describe('switching editions', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   const pairs = [
     { writer: editions[0]!, reader: editions[1]! },
     { writer: editions[1]!, reader: editions[0]! },
   ];
 
   it.each(pairs)('keeps $writer.name results readable and extendable by the $reader.name edition', async ({ writer, reader }) => {
+    // A run is identified by its start time to the millisecond and cleanup removes results of earlier
+    // runs, so the clock is controlled: two scans in one real millisecond would not replace each other.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T00:00:00.000Z'));
     const host = fakeHost([...LIBRARY, NEW_PNG]);
     host.settings.set('minSavingsKB', 10);
     await writer.route(host.ctx, 'scan-start');
@@ -200,6 +208,7 @@ describe('switching editions', () => {
     expect(host.state()?.totals.scanned).toBe(finished.totals.scanned + 1);
 
     host.library.splice(0, 1);
+    vi.setSystemTime(new Date('2026-10-01T01:00:00.000Z'));
     await reader.route(host.ctx, 'scan-start');
     await finishScan(reader, host);
     expect(host.results.has('heavy')).toBe(false);
