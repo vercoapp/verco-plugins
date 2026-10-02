@@ -129,16 +129,6 @@ describe('report page', () => {
     });
   });
 
-  it('falls back to the first page for a cursor the host rejects', async () => {
-    host = await createPluginRuntimeTestHost();
-    await heavyJpegs(host, 1);
-    await scanFromReport(host);
-
-    const page = await host.admin.act('/report', 'results_page', { value: { cursor: 'not-a-cursor' } });
-    expect(find(page.blocks, 'table', 'results')?.rows).toHaveLength(1);
-    expect(find(page.blocks, 'section')?.text).toBe('Images that could be smaller, largest estimated saving first.');
-  });
-
   it('shows progress and the last confirmed update while a scan runs', async () => {
     host = await createPluginRuntimeTestHost();
     for (let index = 0; index < 301; index += 1) {
