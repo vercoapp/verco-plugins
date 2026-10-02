@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "host:checkout": "node scripts/checkout-emdash.mjs",
     "host:qualify-delivery": "node scripts/qualify-media-delivery.mjs",
-    "host:qualify-writers": "node scripts/qualify-media-writers.mjs"
+    "host:qualify-writers": "node scripts/qualify-media-writers.mjs",
+    "host:qualify-recovery": "node scripts/qualify-media-recovery.mjs",
+    "host:measure-decoder": "node scripts/measure-decoder-budget.mjs"
   },
   "devDependencies": {
     "@astrojs/node": "11.1.5",
