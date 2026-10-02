@@ -105,4 +105,5 @@ pnpm typecheck
 pnpm build       # Build the sandbox bundle with the EmDash plugin CLI.
 ```
 
-The publisher in `emdash-plugin.jsonc` is a placeholder until the first release.
+Releases are published by the `verco.app` Atmosphere account, pinned by its DID in
+`emdash-plugin.jsonc`, so a publish from any other account fails.
