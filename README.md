@@ -1,37 +1,47 @@
 # Verco plugins
 
-Work toward an image optimization plugin for [EmDash](https://github.com/emdash-cms/emdash).
-Optimizing existing media safely needs host support that EmDash does not yet provide: replacing
-an image's bytes without changing its ID or URL, keeping the original, and never overwriting an
-editor's concurrent change. This repository qualifies that host support first.
+Plugins for [EmDash](https://github.com/emdash-cms/emdash), maintained by Verco. This is a single
+pnpm workspace: each plugin is its own package under `packages/`, versioned and published
+independently, and all of them share one pinned EmDash target and one test setup.
 
-**Status: pre-release.** There is no installable plugin yet. Nothing here modifies media on a real site:
-the plugin-side guard rejects apply and restore on every host, and all experiments use disposable
-data.
+## Plugins
 
-## What is here
+| Package | Status | What it is |
+| --- | --- | --- |
+| `packages/media-host-adapter` | pre-release | Plugin-side guard for the image optimizer: reports whether a host supports safe media operations and rejects apply and restore unless it does. |
+| Image optimizer | in development | Bulk image optimization for existing media. It needs host support that EmDash does not provide yet; see below. |
 
-- `packages/media-host-adapter/`: reports whether a host supports safe media operations and
-  rejects apply and restore unless it does. Scanning stays available.
-- `experiments/` and `scripts/`: runnable qualification of the pinned EmDash commit, covering
-  media delivery, concurrent writers and crash recovery on Node and SQLite.
-- `host/emdash/`: the pinned EmDash commit (`target.json`), recorded evidence from the
-  qualification runs, and host patches where present.
-- `fixtures/`: a disposable Astro site used by the delivery qualification.
+There is no installable plugin yet. Nothing here modifies media on a real site, and all experiments
+use disposable data.
 
-## Host patches
+## Shared tooling
+
+- `host/emdash/`: the pinned EmDash commit (`target.json`), recorded qualification evidence, and host
+  patches where present.
+- `experiments/`, `scripts/` and `fixtures/`: runnable qualification of the pinned EmDash commit for
+  safe media operations (delivery, concurrent writers, crash recovery) on Node and SQLite. These
+  currently serve the image optimizer only.
+
+## Image optimizer: host support
+
+Optimizing existing media safely means replacing an image's bytes without changing its ID or URL,
+keeping the original, and never overwriting an editor's concurrent change. EmDash's own replacement
+route does none of that, so this repository qualifies the needed host support before the plugin
+applies anything.
+
+### Host patches
 
 `host/emdash/patches/` holds patches against the pinned EmDash commit that add opt-in,
 revision-fenced media replacement with private originals. `pnpm host:pilot` builds a patched
-worktree and `pnpm host:qualify-patch` runs their tests. The patches are a pilot, not a
-supported version range, and nothing in EmDash calls them unless a site sets `safeMedia`.
-See `host/emdash/patches/README.md`.
+worktree and `pnpm host:qualify-patch` runs their tests. The patches are a pilot, not a supported
+version range, and nothing in EmDash calls them unless a site sets `safeMedia`. See
+`host/emdash/patches/README.md`.
 
-## Requirements
+## Working in the repository
 
 Node 22.16 or later and pnpm 10.18.3 (or `npm exec --yes --package pnpm@10.18.3 -- pnpm <command>`).
 Tests use Node's experimental TypeScript stripping and SQLite APIs. The pinned EmDash source is cloned
-into the ignored `.upstream/` directory.
+into the ignored `.upstream/` directory; run `pnpm host:checkout` before the qualification commands.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -48,7 +58,12 @@ pnpm host:patch-export       # Export the pilot worktree's changes as the next p
 pnpm host:qualify-patch      # Run the patches' tests in the pilot worktree.
 ```
 
-Run `pnpm host:checkout` before the qualification commands.
+### Adding a plugin
+
+Create `packages/<name>/` with its own `package.json` (name, version, `license`, and
+`repository.directory`), a README that says what the plugin does and its status, and its own tests.
+Use the shared EmDash pin in `host/emdash/target.json` rather than a copy. Keep plugin-specific
+tooling inside the plugin's directory or name its scripts after the plugin.
 
 ## License
 
