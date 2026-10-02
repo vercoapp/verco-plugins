@@ -134,31 +134,39 @@ function savingCell(result: StoredResult, locale: string): string {
   return result.estimateBasis === 'resize' ? `${saving} (resize only)` : saving;
 }
 
-function summaryStats(run: ScanRun, locale: string): StatItem[] {
+/**
+ * Two blocks of two cards rather than one of four: on a phone the host shows about two cards per
+ * row, and a fourth card was cut off. The saving comes first because it is what the page is for.
+ */
+function summaryStats(run: ScanRun, locale: string): [StatItem[], StatItem[]] {
   const { totals } = run;
   const skipped = Object.values(totals.skipped).reduce((sum, count) => sum + count, 0);
   const reasons = (Object.entries(totals.skipped) as [SkipReason, number][])
     .filter(([, count]) => count > 0)
     .map(([reason, count]) => `${formatCount(count, locale)} ${SKIP_LABELS[reason]}`);
   return [
-    { label: 'Images scanned', value: formatCount(totals.scanned, locale) },
-    {
-      label: 'Could be smaller',
-      value: formatCount(totals.flagged, locale),
-      ...(totals.unestimated > 0
-        ? { description: `${formatCount(totals.unestimated, locale)} without a saving estimate` }
-        : {}),
-    },
-    {
-      label: 'Estimated saving',
-      value: formatBytes(totals.estimatedSavingsBytes, locale),
-      description: 'From metadata only',
-    },
-    {
-      label: 'Skipped',
-      value: formatCount(skipped, locale),
-      ...(reasons.length > 0 ? { description: reasons.join(', ') } : {}),
-    },
+    [
+      {
+        label: 'Estimated saving',
+        value: formatBytes(totals.estimatedSavingsBytes, locale),
+        description: 'From metadata only',
+      },
+      {
+        label: 'Could be smaller',
+        value: formatCount(totals.flagged, locale),
+        ...(totals.unestimated > 0
+          ? { description: `${formatCount(totals.unestimated, locale)} without a saving estimate` }
+          : {}),
+      },
+    ],
+    [
+      { label: 'Images scanned', value: formatCount(totals.scanned, locale) },
+      {
+        label: 'Skipped',
+        value: formatCount(skipped, locale),
+        ...(reasons.length > 0 ? { description: reasons.join(', ') } : {}),
+      },
+    ],
   ];
 }
 
@@ -167,13 +175,15 @@ function resultsTable(view: ReportView): Block {
   return {
     type: 'table',
     block_id: 'results',
+    // The saving and the reason come right after the file: on a phone the table scrolls sideways
+    // and only the first columns are in view.
     columns: [
       { key: 'file', label: 'File' },
-      { key: 'format', label: 'Format', format: 'badge' },
-      { key: 'dimensions', label: 'Dimensions' },
-      { key: 'size', label: 'Size' },
       { key: 'saving', label: 'Estimated saving' },
       { key: 'findings', label: 'Why' },
+      { key: 'size', label: 'Size' },
+      { key: 'dimensions', label: 'Dimensions' },
+      { key: 'format', label: 'Format', format: 'badge' },
     ],
     rows: results.items.map(({ data }) => ({
       file: data.filename,
@@ -247,7 +257,9 @@ export function reportPage(view: ReportView, toast?: BlockResponse['toast']): Bl
     });
   }
 
-  blocks.push({ type: 'stats', items: summaryStats(run, locale) });
+  const [outcome, coverage] = summaryStats(run, locale);
+  blocks.push({ type: 'stats', block_id: 'outcome', items: outcome });
+  blocks.push({ type: 'stats', block_id: 'coverage', items: coverage });
   blocks.push({
     type: 'context',
     text: [
@@ -260,7 +272,8 @@ export function reportPage(view: ReportView, toast?: BlockResponse['toast']): Bl
     elements: [
       ...(running ? [] : [{ type: 'button' as const, action_id: ACTION_START, label: 'Scan again', style: 'primary' as const }]),
       { type: 'button', action_id: ACTION_REFRESH, label: 'Refresh' },
-      { type: 'link', label: 'Settings', target: { kind: 'plugin-settings' } },
+      // A link styled as a button: it navigates without a round trip through the plugin.
+      { type: 'link', label: 'Settings', target: { kind: 'plugin-settings' }, appearance: 'secondary' },
     ],
   });
 

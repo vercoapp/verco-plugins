@@ -70,14 +70,18 @@ describe('report page', () => {
     });
     expect(find(started.blocks, 'banner')?.title).toBe('Scan in progress');
     expect(find(page.blocks, 'banner')).toBeUndefined();
-    expect(find(page.blocks, 'stats')?.items).toEqual([
-      { label: 'Images scanned', value: '4' },
-      { label: 'Could be smaller', value: '3', description: '1 without a saving estimate' },
+    expect(find(page.blocks, 'stats', 'outcome')?.items).toEqual([
       { label: 'Estimated saving', value: '740.2 kB', description: 'From metadata only' },
+      { label: 'Could be smaller', value: '3', description: '1 without a saving estimate' },
+    ]);
+    expect(find(page.blocks, 'stats', 'coverage')?.items).toEqual([
+      { label: 'Images scanned', value: '4' },
       { label: 'Skipped', value: '1', description: '1 unsupported format' },
     ]);
 
     const table = find(page.blocks, 'table', 'results');
+    // On a phone only the first columns are in view, so the saving and the reason come first.
+    expect(table?.columns.map((column) => column.key)).toEqual(['file', 'saving', 'findings', 'size', 'dimensions', 'format']);
     expect(table?.rows).toEqual([
       {
         file: 'photo-1.jpg',
@@ -149,7 +153,10 @@ describe('report page', () => {
       description: expect.stringMatching(/^300 images scanned so far\. Last confirmed update .+ UTC\./),
     });
     const actions = find(page.blocks, 'actions')!;
-    expect(actions.elements.map((element) => element.label)).toEqual(['Refresh', 'Settings']);
+    expect(actions.elements).toEqual([
+      { type: 'button', action_id: 'refresh', label: 'Refresh' },
+      { type: 'link', label: 'Settings', target: { kind: 'plugin-settings' }, appearance: 'secondary' },
+    ]);
 
     const again = await host.admin.act('/report', 'start_scan');
     expect(again.toast).toEqual({ type: 'info', message: 'A scan is already running.' });
@@ -172,7 +179,7 @@ describe('report page', () => {
     await heavyJpegs(host, 1);
     // The heavy JPEG saves 369.6 kB, 61.6% of its size.
     await host.fixtures.plugin.setting('minSavingsPercent', 62);
-    const flagged = async () => find((await scanFromReport(host!)).page.blocks, 'stats')?.items[1]?.value;
+    const flagged = async () => find((await scanFromReport(host!)).page.blocks, 'stats', 'outcome')?.items[1]?.value;
     expect(await flagged()).toBe('0');
 
     await host.fixtures.plugin.setting('minSavingsPercent', 61);
@@ -195,11 +202,11 @@ describe('report page', () => {
       height: 800,
     });
     const { page: german } = await scanFromReport(host, { locale: 'de' });
-    expect(find(german.blocks, 'stats')?.items[2]?.value).toBe('1,3 MB');
+    expect(find(german.blocks, 'stats', 'outcome')?.items[0]?.value).toBe('1,3 MB');
     expect(find(german.blocks, 'table', 'results')?.rows[0]).toMatchObject({ size: '1,5 MB', dimensions: '1200 × 800' });
 
     const english = await host.admin.loadPage('/report', { locale: 'en' });
-    expect(find(english.blocks, 'stats')?.items[2]?.value).toBe('1.3 MB');
+    expect(find(english.blocks, 'stats', 'outcome')?.items[0]?.value).toBe('1.3 MB');
   });
 
   it('falls back to English for a locale Intl does not accept', () => {

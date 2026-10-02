@@ -2,6 +2,7 @@
   "$schema": "./node_modules/@emdash-cms/plugin-cli/schemas/emdash-plugin.schema.json",
 
   "slug": "image-optimizer",
+  "name": "Image optimizer",
   // Placeholder: set the publisher DID and the security contact before the first release.
   "publisher": "did:plc:placeholder",
 
