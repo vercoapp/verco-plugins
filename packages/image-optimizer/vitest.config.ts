@@ -2,8 +2,9 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { emdashPluginTest } from '@emdash-cms/plugin-test/config';
 import { defineConfig, type Plugin } from 'vitest/config';
+
+import { isolatedPluginTest } from './vitest.plugin.ts';
 
 const root = dirname(fileURLToPath(import.meta.url));
 
@@ -30,13 +31,15 @@ const emdashVirtualStubs: Plugin = {
   load: (id) => (id.startsWith('\0virtual:emdash/') ? virtualStubs[id.slice(1)] : null),
 };
 
+// tests/host-rejection.test.ts is excluded: it makes workerd cancel unrelated in-flight requests
+// (see the comment in that file), so `pnpm test` runs it on its own with vitest.host-rejection.config.ts.
 export default defineConfig({
   test: {
     projects: [
       {
         // The sandboxed plugin, built and run inside workerd.
-        plugins: [emdashPluginTest()],
-        test: { name: 'sandbox', include: ['tests/*.test.ts'] },
+        plugins: [isolatedPluginTest()],
+        test: { name: 'sandbox', include: ['tests/*.test.ts'], exclude: ['tests/host-rejection.test.ts', '**/node_modules/**'] },
       },
       {
         // Native-only modules (the local processor), which need Node and Sharp.
