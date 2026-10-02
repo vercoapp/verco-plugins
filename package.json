@@ -8,8 +8,8 @@
     "node": ">=22.16"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test packages/media-host-adapter/test/*.test.mjs experiments/*.test.mjs",
-    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test packages/media-host-adapter/test/*.test.mjs experiments/*.test.mjs && pnpm --dir packages/image-optimizer test",
+    "typecheck": "tsc --noEmit && pnpm --dir packages/image-optimizer typecheck",
     "host:checkout": "node scripts/checkout-emdash.mjs",
     "host:qualify-delivery": "node scripts/qualify-media-delivery.mjs",
     "host:qualify-writers": "node scripts/qualify-media-writers.mjs"

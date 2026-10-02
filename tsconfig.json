@@ -9,5 +9,6 @@
     "erasableSyntaxOnly": true,
     "noEmit": true
   },
-  "include": ["packages/*/src/**/*.ts"]
+  "include": ["packages/*/src/**/*.ts"],
+  "exclude": ["packages/image-optimizer"]
 }

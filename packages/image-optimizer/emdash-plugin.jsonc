@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/@emdash-cms/plugin-cli/schemas/emdash-plugin.schema.json",
+
+  "slug": "image-optimizer",
+  // Placeholder: set the publisher DID and the security contact before the first release.
+  "publisher": "did:plc:placeholder",
+
+  "license": "MIT",
+  "author": { "name": "Verco" },
+  "security": { "url": "https://example.com/security" },
+  "description": "Reports images in the media library that could be smaller. Read-only: it never changes media.",
+
+  // Trust contract. The scan reads media metadata only (type, size, dimensions):
+  // no bytes, no writes, no outbound network.
+  "capabilities": ["media:read"],
+  "allowedHosts": [],
+  "storage": {}
+}
