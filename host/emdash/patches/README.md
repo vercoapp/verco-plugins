@@ -12,6 +12,7 @@ tree, changed files, related tests, scope and limits.
 | [`0004-fenced-writers-and-readers.patch`](0004-fenced-writers-and-readers.patch) | Opt-in `safeMedia`: startup wiring, revision-aware storage for every reader, the editor replace route using the fenced service, legacy writers fenced. |
 | [`0005-interrupted-operation-reconciliation.patch`](0005-interrupted-operation-reconciliation.patch) | Reconciliation: interrupted operations are completed through the fenced steps or aborted, and objects no record needs are removed, after startup, on maintenance ticks and on demand. One writing process is assumed. |
 | [`0006-byte-exact-restore.patch`](0006-byte-exact-restore.patch) | Fenced byte-exact restore of a retained original through the same journal and receipts, and `emdash/media/safe-recovery`, a recovery entry point that works from the database and storage directories without the runtime or any plugin. |
+| [`0007-native-safe-media-access.patch`](0007-native-safe-media-access.patch) | `ctx.media.safe` for native plugins that declare the native-only capability `media:bytes:replace` on a `safeMedia` host: support discovery, the active revision, same-geometry replace, restore, restorable originals and operation status, attributed to the plugin. Sandboxed-format plugins, in a sandbox or in-process, cannot declare the capability. |
 
 Patches are cumulative and apply in order; each records the git tree it produces.
 
@@ -21,10 +22,16 @@ apply to a pristine tree with `pnpm host:pilot-check`. Export changes with
 `pnpm host:qualify-patch`, which refuses a worktree that differs from the
 last exported patch and runs every patch's tests.
 
-The patches are a pilot. They do not yet cover every consumer of media bytes, the plugin-facing
-bridges (restore is not reachable from plugins or routes), or installation and rollback instructions,
-and they are not a supported version range. Reconciliation assumes a single writing process; another
-process's work is protected only by a grace period.
+The patches are a pilot. They do not yet cover every consumer of media bytes, a bridge for sandboxed
+plugins (only native plugins can reach replace and restore, and no route exposes restore), or
+installation and rollback instructions, and they are not a supported version range. Only Node,
+SQLite and local storage are exercised; D1 and object storage are not supported. Reconciliation
+assumes a single writing process; another process's work is protected only by a grace period.
+
+The native access in `0007` is provisional: the capability name, the `ctx.media.safe` shape and
+protocol version 1 may change. `support()` describes the configured host (runtime, database, storage,
+in-process locks); it is not a statement that the host is qualified. A native plugin sees the access
+only when `safeMedia` is configured, so its absence means the host offers no safe media operations.
 
 To restore a media item with the site stopped and no plugin installed (Node, SQLite, local storage):
 

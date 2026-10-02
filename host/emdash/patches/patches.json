@@ -148,6 +148,39 @@
         "A\tpackages/core/tests/unit/media/safe/restore.test.ts",
         "M\tpackages/core/tsdown.config.ts"
       ]
+    },
+    {
+      "name": "0007-native-safe-media-access.patch",
+      "tasks": [
+        "3.1-native"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/plugins/define-plugin.test.ts",
+        "packages/core/tests/unit/plugins/adapt-sandbox-entry.test.ts",
+        "packages/core/tests/unit/plugins/standard-format.test.ts",
+        "packages/core/tests/unit/plugins/manifest-schema.test.ts",
+        "packages/core/tests/integration/plugins/media-capabilities.test.ts"
+      ],
+      "scope": "Native safe-media access: `ctx.media.safe` for native plugins (built with `definePlugin()`) that declare the native-only capability `media:bytes:replace`, on hosts with `safeMedia` configured. It offers `support()` (protocol 1 and a host profile derived from the configured database and storage descriptors and the running runtime), `revision(mediaId)`, `replace(request)` with geometry forced to `unchanged`, `restore(request)`, `listRestorableOriginals(mediaId)` and `operation(mediaId, operationId)`. Operations are recorded as created by `plugin:<id>`; a plugin cannot read or reuse another caller's operation IDs. The capability is outside the shared manifest vocabulary, so registry and marketplace manifests, the sandboxed-format adapter and `plugins`/`sandboxed` configuration of standard-format plugins reject it. Exercised with a file-backed SQLite database and real local storage: replace and restore with receipts, replay of an operation ID, a stale expected revision, a refused geometry change, and no access for native plugins without the capability, in-process sandboxed-format plugins and hosts without `safeMedia`, both through the context factory and through a runtime plugin route.",
+      "limits": "Pilot only: Node, SQLite and local storage; D1 and object storage are not supported, and the reported profile is a description, not a qualification. No bridge exists for sandboxed plugins (isolated sandboxes receive no safe-media operations at all), and no route or CSRF-protected admin surface is added. The capability name, the `ctx.media.safe` shape and protocol version 1 are provisional. Nativeness is decided by construction: only `definePlugin()` sets the grant, so in-process code that is already trusted could forge it; this is not an isolation boundary. The operation-ownership check runs before the service call, so two callers racing on the same new operation ID with an identical request may share a receipt. The configuration check in the Astro integration is tested through its helper, not through a full build. The native capability is kept out of `ResolvedPlugin.capabilities`, so places that list a plugin's capabilities do not show it.",
+      "sha256": "4eb22867d3577d3469b71d4e66b5d7daefc6621409f116c73c9c4c758b9551b0",
+      "resultingTree": "49310725f2338bca145a5db2e1f3eea686d96565",
+      "files": [
+        "M\tpackages/core/src/astro/integration/index.ts",
+        "M\tpackages/core/src/emdash-runtime.ts",
+        "M\tpackages/core/src/index.ts",
+        "A\tpackages/core/src/media/safe/plugin-access.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/runtime.ts",
+        "M\tpackages/core/src/plugins/adapt-sandbox-entry.ts",
+        "M\tpackages/core/src/plugins/context.ts",
+        "M\tpackages/core/src/plugins/define-plugin.ts",
+        "M\tpackages/core/src/plugins/index.ts",
+        "A\tpackages/core/src/plugins/native-capabilities.ts",
+        "M\tpackages/core/src/plugins/types.ts",
+        "A\tpackages/core/tests/integration/runtime/plugin-safe-media.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/native-access.test.ts"
+      ]
     }
   ]
 }

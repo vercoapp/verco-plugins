@@ -1,0 +1,1238 @@
+diff --git a/packages/core/src/astro/integration/index.ts b/packages/core/src/astro/integration/index.ts
+index 46120d2275f01f4d26bcccf51ddfddff14afc6ed..75c297883393273a97311d7993437101bec38e5d 100644
+--- a/packages/core/src/astro/integration/index.ts
++++ b/packages/core/src/astro/integration/index.ts
+@@ -26,6 +26,7 @@ import {
+ } from "../../migrations/integration-metadata.js";
+ import { buildMigrationManifest } from "../../migrations/manifest-builder.js";
+ import { writeMigrationManifest } from "../../migrations/manifest-writer.js";
++import { assertNoSandboxedNativeCapabilities } from "../../plugins/native-capabilities.js";
+ import type { ResolvedPlugin } from "../../plugins/types.js";
+ import {
+ 	normalizeRegistryConfig,
+@@ -520,6 +521,9 @@ export function emdash(config: EmDashConfig = {}): AstroIntegration {
+ 		}
+ 	}
+ 
++	assertNoSandboxedNativeCapabilities(pluginDescriptors, false);
++	assertNoSandboxedNativeCapabilities(sandboxedDescriptors, true);
++
+ 	// Validate: non-standard plugins cannot be placed in sandboxed: []
+ 	for (const descriptor of sandboxedDescriptors) {
+ 		if (descriptor.format !== "standard") {
+diff --git a/packages/core/src/emdash-runtime.ts b/packages/core/src/emdash-runtime.ts
+index d79bcc57fd37175d510d50f5fe20999955493ef5..d065c99419af7d0090250e14a26a96be6e8a4e62 100644
+--- a/packages/core/src/emdash-runtime.ts
++++ b/packages/core/src/emdash-runtime.ts
+@@ -1543,6 +1543,7 @@ export class EmDashRuntime {
+ 			? (await import("./media/safe/runtime.js")).createSafeMedia({
+ 					config: deps.config.safeMedia,
+ 					storageDescriptor: deps.config.storage,
++					databaseDescriptor: deps.config.database,
+ 					rawStorage,
+ 					db,
+ 					resolveDb,
+@@ -2027,6 +2028,7 @@ export class EmDashRuntime {
+ 			contentActions,
+ 			now: deps.now,
+ 			storage: storage ?? undefined,
++			safeMedia: safeMedia ? { service: safeMedia.service, support: safeMedia.support } : undefined,
+ 			siteInfo,
+ 			commentModerate: (
+ 				pluginId: string,
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 4e1a10fa7c4b175986022cb1f85bb701cdbfaf7b..01a637c59a2eabca9bd7da1ed8d3e3492811d196 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -366,6 +366,16 @@ export type {
+ 	MediaAccess,
+ 	MediaBytes,
+ 	MediaMetadataPatch,
++	NativePluginCapability,
++	SafeMediaAccess,
++	SafeMediaHostProfile,
++	SafeMediaOperationStatus,
++	SafeMediaReplaceRequest,
++	SafeMediaRestorableOriginal,
++	SafeMediaRestoreRequest,
++	SafeMediaResult,
++	SafeMediaRevision,
++	SafeMediaSupport,
+ 	HttpAccess,
+ 	PluginHttpResponseWire,
+ 	PluginHttpRedirectAction,
+diff --git a/packages/core/src/media/safe/plugin-access.ts b/packages/core/src/media/safe/plugin-access.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..74103e7e14cb1b78a4ef29b76ed7853cfe288cc6
+--- /dev/null
++++ b/packages/core/src/media/safe/plugin-access.ts
+@@ -0,0 +1,185 @@
++/**
++ * Safe media operations for native plugins (`ctx.media.safe`).
++ *
++ * A narrow surface over the replacement service: support discovery, the active
++ * revision, same-geometry replacement, restore of retained originals and
++ * operation status. Operations are attributed to the plugin, and a plugin can
++ * neither read nor reuse another caller's operation records.
++ *
++ * Only types are imported from the service so this module stays free of
++ * Node-only dependencies.
++ */
++
++import type {
++	MediaReplacementService,
++	PublishedReceipt,
++	RejectedReceipt,
++	ReplaceResult,
++	RestorableOriginal,
++} from "./replacement-service.js";
++
++/** Version of this surface. A caller must refuse a protocol it does not know. */
++export const SAFE_MEDIA_PROTOCOL = 1;
++
++/** The host profile as configured, so a caller can decide whether it is qualified. */
++export interface SafeMediaHostProfile {
++	runtime: "node" | "bun" | "deno" | "workerd" | "unknown";
++	database: "sqlite" | "libsql" | "postgres" | "d1" | "unknown";
++	storage: "local" | "s3" | "r2" | "unknown";
++	/** Operation locks cover one process; work of another process is protected only by a grace period. */
++	locks: "in-process";
++}
++
++export interface SafeMediaSupport {
++	protocol: typeof SAFE_MEDIA_PROTOCOL;
++	profile: SafeMediaHostProfile;
++	/** Formats that may be replaced, each only by the same format. */
++	formats: readonly ("jpeg" | "png" | "webp")[];
++	/** Replacement through this surface never changes dimensions. */
++	geometry: "unchanged";
++	limits: { maxBytes: number; maxPixels: number };
++}
++
++/** The active revision of a ready media item; pass `revisionId` as `expectedRevisionId`. */
++export interface SafeMediaRevision {
++	mediaId: string;
++	revisionId: string;
++	mimeType: string;
++	size: number | null;
++	width: number | null;
++	height: number | null;
++	/** Null until the host has digested these bytes (on the first operation that retains them). */
++	sha256: string | null;
++}
++
++export interface SafeMediaReplaceRequest {
++	mediaId: string;
++	/** Chosen by the caller; repeating the same request with it returns the stored outcome. */
++	operationId: string;
++	expectedRevisionId: string;
++	bytes: Uint8Array;
++	/** SHA-256 of `bytes`, checked by the host before anything is staged. */
++	expectedSha256?: string;
++}
++
++export interface SafeMediaRestoreRequest {
++	mediaId: string;
++	operationId: string;
++	expectedRevisionId: string;
++	/** Defaults to the original retained by the operation that published `expectedRevisionId`. */
++	originalSha256?: string;
++}
++
++export interface SafeMediaOperationStatus {
++	state: string;
++	kind: string;
++	receipt: PublishedReceipt | RejectedReceipt | null;
++}
++
++export type SafeMediaResult = ReplaceResult;
++export type SafeMediaRestorableOriginal = RestorableOriginal;
++
++export interface SafeMediaAccess {
++	support(): Promise<SafeMediaSupport>;
++	/** Null when the media item does not exist or is not ready. */
++	revision(mediaId: string): Promise<SafeMediaRevision | null>;
++	/** Publish same-format, same-dimension bytes against `expectedRevisionId`. */
++	replace(request: SafeMediaReplaceRequest): Promise<SafeMediaResult>;
++	/** Publish a retained original of this media item against `expectedRevisionId`. */
++	restore(request: SafeMediaRestoreRequest): Promise<SafeMediaResult>;
++	listRestorableOriginals(mediaId: string): Promise<SafeMediaRestorableOriginal[]>;
++	/** Status and receipt of an operation this plugin started; null for unknown or foreign IDs. */
++	operation(mediaId: string, operationId: string): Promise<SafeMediaOperationStatus | null>;
++}
++
++/** What the host provides to build the plugin surface. */
++export interface SafeMediaPluginHost {
++	service: MediaReplacementService;
++	support: SafeMediaSupport;
++}
++
++export function safeMediaOperationOwner(pluginId: string): string {
++	return `plugin:${pluginId}`;
++}
++
++const FOREIGN_OPERATION: SafeMediaResult = {
++	ok: false,
++	code: "CONFLICTING_OPERATION",
++	message: "This operation ID was already used by another caller.",
++	retryable: false,
++};
++
++export function createSafeMediaPluginAccess(
++	host: SafeMediaPluginHost,
++	pluginId: string,
++): SafeMediaAccess {
++	const { service } = host;
++	const owner = safeMediaOperationOwner(pluginId);
++	const support = Object.freeze({
++		...host.support,
++		profile: Object.freeze({ ...host.support.profile }),
++		formats: Object.freeze([...host.support.formats]),
++		limits: Object.freeze({ ...host.support.limits }),
++	});
++
++	/** True when the ID is already recorded for this media item by a different caller. */
++	async function foreign(mediaId: string, operationId: string): Promise<boolean> {
++		const existing = await service.getOperation(mediaId, operationId);
++		return existing !== null && existing.createdBy !== owner;
++	}
++
++	return {
++		async support() {
++			return support;
++		},
++
++		async revision(mediaId) {
++			const revision = await service.getSourceRevision(mediaId);
++			if (!revision) return null;
++			return {
++				mediaId: revision.media_id,
++				revisionId: revision.id,
++				mimeType: revision.mime_type,
++				size: revision.size,
++				width: revision.width,
++				height: revision.height,
++				sha256: revision.sha256,
++			};
++		},
++
++		async replace(request) {
++			if (await foreign(request.mediaId, request.operationId)) return FOREIGN_OPERATION;
++			// Built field by field: geometry and attribution are the host's, never the caller's.
++			return service.replace({
++				mediaId: request.mediaId,
++				operationId: request.operationId,
++				expectedRevisionId: request.expectedRevisionId,
++				bytes: request.bytes,
++				expectedSha256: request.expectedSha256,
++				geometry: "unchanged",
++				createdBy: owner,
++			});
++		},
++
++		async restore(request) {
++			if (await foreign(request.mediaId, request.operationId)) return FOREIGN_OPERATION;
++			return service.restore({
++				mediaId: request.mediaId,
++				operationId: request.operationId,
++				expectedRevisionId: request.expectedRevisionId,
++				originalSha256: request.originalSha256,
++				createdBy: owner,
++			});
++		},
++
++		listRestorableOriginals(mediaId) {
++			return service.listRestorableOriginals(mediaId);
++		},
++
++		async operation(mediaId, operationId) {
++			const status = await service.getOperation(mediaId, operationId);
++			if (!status || status.createdBy !== owner) return null;
++			return { state: status.state, kind: status.kind, receipt: status.receipt };
++		},
++	};
++}
+diff --git a/packages/core/src/media/safe/replacement-service.ts b/packages/core/src/media/safe/replacement-service.ts
+index 0841b62963bb549a545e0e588dbfa7fe6e341634..6344785cb39a264cd62d4554b4611aa23c59e333 100644
+--- a/packages/core/src/media/safe/replacement-service.ts
++++ b/packages/core/src/media/safe/replacement-service.ts
+@@ -900,7 +900,12 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		async getOperation(mediaId: string, operationId: string) {
+ 			const operation = await repo.getOperation(mediaId, operationId);
+ 			if (!operation) return null;
+-			return { state: operation.state, kind: operation.kind, receipt: parseReceipt(operation) };
++			return {
++				state: operation.state,
++				kind: operation.kind,
++				createdBy: operation.created_by,
++				receipt: parseReceipt(operation),
++			};
+ 		},
+ 	};
+ }
+diff --git a/packages/core/src/media/safe/runtime.ts b/packages/core/src/media/safe/runtime.ts
+index 66f4ac1e96a23bb7392ea12446db0e224a86a3aa..b4c89c41a7589b2901701dc023ab3b75375c7448 100644
+--- a/packages/core/src/media/safe/runtime.ts
++++ b/packages/core/src/media/safe/runtime.ts
+@@ -23,7 +23,9 @@ import type {
+ 	UploadResult,
+ } from "../../storage/types.js";
+ import { createDecodeAdmission } from "./admission.js";
+-import { resolveDecodeLimits } from "./decode-limits.js";
++import { resolveDecodeLimits, SAFE_IMAGE_FORMATS } from "./decode-limits.js";
++import type { SafeMediaHostProfile, SafeMediaSupport } from "./plugin-access.js";
++import { SAFE_MEDIA_PROTOCOL } from "./plugin-access.js";
+ import { createLocalPrivateStorage, PrivateStorageConfigError } from "./private-local.js";
+ import { createPrivateOriginalStore } from "./private-originals.js";
+ import type { ReconcileOptions, ReconciliationReport } from "./reconciliation.js";
+@@ -99,9 +101,45 @@ export function createRevisionAwareStorage(
+ 	return new RevisionAwareStorage(storage, resolveDb);
+ }
+ 
++const DATABASE_KINDS: Readonly<Record<string, SafeMediaHostProfile["database"]>> = {
++	"emdash/db/sqlite": "sqlite",
++	"emdash/db/libsql": "libsql",
++	"emdash/db/postgres": "postgres",
++	"@emdash-cms/cloudflare/db/d1": "d1",
++};
++
++const STORAGE_KINDS: Readonly<Record<string, SafeMediaHostProfile["storage"]>> = {
++	[LOCAL_STORAGE_ENTRYPOINT]: "local",
++	"emdash/storage/s3": "s3",
++	"@emdash-cms/cloudflare/storage/r2": "r2",
++};
++
++function detectRuntime(): SafeMediaHostProfile["runtime"] {
++	if (globalThis.navigator?.userAgent === "Cloudflare-Workers") return "workerd";
++	const versions: Partial<Record<string, string>> | undefined = globalThis.process?.versions;
++	if (versions?.bun) return "bun";
++	if (versions?.deno) return "deno";
++	return versions?.node ? "node" : "unknown";
++}
++
++/** Describe the configured host from its descriptors; anything unrecognized is `unknown`. */
++export function describeSafeMediaHostProfile(descriptors: {
++	databaseEntrypoint: string | undefined;
++	storageEntrypoint: string | undefined;
++}): SafeMediaHostProfile {
++	return {
++		runtime: detectRuntime(),
++		database: DATABASE_KINDS[descriptors.databaseEntrypoint ?? ""] ?? "unknown",
++		storage: STORAGE_KINDS[descriptors.storageEntrypoint ?? ""] ?? "unknown",
++		locks: "in-process",
++	};
++}
++
+ export interface CreateSafeMediaOptions {
+ 	config: SafeMediaConfig;
+ 	storageDescriptor: { entrypoint: string; config: unknown } | undefined;
++	/** Reported in the support description only; it does not select the database. */
++	databaseDescriptor?: { entrypoint: string };
+ 	/** The active storage, before any decoration. The service reads and writes this one. */
+ 	rawStorage: Storage | null;
+ 	db: Kysely<Database>;
+@@ -114,6 +152,8 @@ export interface SafeMedia {
+ 	/** Storage for every reader; stable keys resolve to the active revision. */
+ 	storage: Storage;
+ 	service: MediaReplacementService;
++	/** What native plugins see through `ctx.media.safe.support()`. */
++	support: SafeMediaSupport;
+ 	/**
+ 	 * Reconcile interrupted operations and orphaned objects, logging the outcome.
+ 	 * Never throws: readers stay on complete revisions whether or not it succeeds.
+@@ -187,6 +227,16 @@ export function createSafeMedia(options: CreateSafeMediaOptions): SafeMedia {
+ 	return {
+ 		storage: createRevisionAwareStorage(rawStorage, options.resolveDb),
+ 		service,
++		support: {
++			protocol: SAFE_MEDIA_PROTOCOL,
++			profile: describeSafeMediaHostProfile({
++				databaseEntrypoint: options.databaseDescriptor?.entrypoint,
++				storageEntrypoint: storageDescriptor.entrypoint,
++			}),
++			formats: SAFE_IMAGE_FORMATS,
++			geometry: "unchanged",
++			limits: { maxBytes: limits.maxBytes, maxPixels: limits.maxPixels },
++		},
+ 		reconcile: (reconcileOptions) => runSafeMediaReconciliation(service, reconcileOptions),
+ 	};
+ }
+diff --git a/packages/core/src/plugins/adapt-sandbox-entry.ts b/packages/core/src/plugins/adapt-sandbox-entry.ts
+index 75c467902f82d36e190a0be52cf76be3e23f6877..189f4ca5402ee2cbc1d8c1110f0e763fd0b27111 100644
+--- a/packages/core/src/plugins/adapt-sandbox-entry.ts
++++ b/packages/core/src/plugins/adapt-sandbox-entry.ts
+@@ -15,6 +15,7 @@ import { z } from "zod";
+ import type { PluginDescriptor } from "../astro/integration/runtime.js";
+ import type { RouteEntry, RouteHandler, SandboxedPlugin } from "../plugin-types.js";
+ import { PLUGIN_CAPABILITIES, HOOK_NAMES } from "./manifest-schema.js";
++import { isNativePluginCapability } from "./native-capabilities.js";
+ import { sanitizeHeadersForSandbox } from "./request-meta.js";
+ import { normalizePluginCapabilities, warnDeprecatedPluginCapabilities } from "./types.js";
+ import type {
+@@ -289,6 +290,12 @@ export function adaptSandboxEntry(
+ 	// sees the canonical form.
+ 	const rawCapabilities = descriptor.capabilities ?? [];
+ 	for (const cap of rawCapabilities) {
++		if (isNativePluginCapability(cap)) {
++			throw new Error(
++				`Plugin "${pluginId}" declares "${cap}", which only native plugins may declare. ` +
++					"Sandboxed-format plugins cannot receive it, even in-process.",
++			);
++		}
+ 		if (!VALID_CAPABILITIES_SET.has(cap)) {
+ 			throw new Error(
+ 				`Invalid capability "${cap}" in plugin "${pluginId}". ` +
+diff --git a/packages/core/src/plugins/context.ts b/packages/core/src/plugins/context.ts
+index ee05129cc8b217ec64f96e92a412947712fc3473..4abf1a0615d9e1ae59ac380e76e95119519a77c2 100644
+--- a/packages/core/src/plugins/context.ts
++++ b/packages/core/src/plugins/context.ts
+@@ -48,6 +48,8 @@ import {
+ } from "../import/ssrf.js";
+ import { enrichImageMetadata } from "../media/enrich.js";
+ import { matchesMimeAllowlist, normalizeMime } from "../media/mime.js";
++import type { SafeMediaPluginHost } from "../media/safe/plugin-access.js";
++import { createSafeMediaPluginAccess } from "../media/safe/plugin-access.js";
+ import { markContentMediaUsageCollectionStaleSafely } from "../media/usage/content-refresh.js";
+ import { SchemaRegistry } from "../schema/registry.js";
+ import { invalidateSiteSettingsCache } from "../settings/index.js";
+@@ -1534,6 +1536,11 @@ export interface PluginContextFactoryOptions {
+ 		filename: string,
+ 		contentType: string,
+ 	) => Promise<{ uploadUrl: string; mediaId: string }>;
++	/**
++	 * Revision-fenced media operations, present when `safeMedia` is configured.
++	 * Exposed as `ctx.media.safe` to native plugins declaring `media:bytes:replace`.
++	 */
++	safeMedia?: SafeMediaPluginHost;
+ 	/**
+ 	 * Site information for ctx.site and ctx.url().
+ 	 * If not provided, site info will have empty defaults.
+@@ -1646,6 +1653,7 @@ export class PluginContextFactory {
+ 	private now: () => Date;
+ 	private emailPipeline?: EmailPipeline;
+ 	private commentModerate?: PluginContextFactoryOptions["commentModerate"];
++	private safeMedia?: SafeMediaPluginHost;
+ 	/**
+ 	 * Plugin IDs already warned about a missing media-write backend, so the
+ 	 * warning fires once per factory instead of on every hook/route context
+@@ -1667,6 +1675,7 @@ export class PluginContextFactory {
+ 		this.now = options.now ?? (() => new Date());
+ 		this.emailPipeline = options.emailPipeline;
+ 		this.commentModerate = options.commentModerate;
++		this.safeMedia = options.safeMedia;
+ 	}
+ 
+ 	/**
+@@ -1809,6 +1818,11 @@ export class PluginContextFactory {
+ 		if (capabilities.has("media:metadata:write") && media) {
+ 			media.updateMetadata = (id, patch) => updatePluginMediaMetadata(db, id, patch);
+ 		}
++		// Only definePlugin() sets nativeCapabilities; sandboxed-format plugins never carry it.
++		if (this.safeMedia && plugin.nativeCapabilities?.includes("media:bytes:replace")) {
++			media ??= createBlockedMediaReadAccess();
++			media.safe = createSafeMediaPluginAccess(this.safeMedia, plugin.id);
++		}
+ 
+ 		// Capability-gated: http
+ 		let http: HttpAccess | undefined;
+diff --git a/packages/core/src/plugins/define-plugin.ts b/packages/core/src/plugins/define-plugin.ts
+index a40ad782066a9a3841050a07d90385d1da7c1a00..a0388943ce658bfb4e0df6d2b08688b4a7c7e51b 100644
+--- a/packages/core/src/plugins/define-plugin.ts
++++ b/packages/core/src/plugins/define-plugin.ts
+@@ -16,8 +16,10 @@ import {
+ 	type PluginRouteBodyMode,
+ } from "@emdash-cms/plugin-types";
+ 
++import { isNativePluginCapability, type NativePluginCapability } from "./native-capabilities.js";
+ import { normalizePluginCapabilities, warnDeprecatedPluginCapabilities } from "./types.js";
+ import type {
++	PluginCapability,
+ 	PluginDefinition,
+ 	ResolvedPlugin,
+ 	PluginHooks,
+@@ -208,14 +210,20 @@ function defineNativePlugin<TStorage extends PluginStorageConfig>(
+ 	// accepted; aliases are rewritten to current names below so the runtime only
+ 	// ever sees the canonical form.
+ 	const validCapabilities = new Set<string>(PLUGIN_CAPABILITIES);
++	const sharedCapabilities: PluginCapability[] = [];
++	const nativeCapabilities: NativePluginCapability[] = [];
+ 	for (const cap of capabilities) {
+-		if (!validCapabilities.has(cap)) {
++		if (isNativePluginCapability(cap)) {
++			if (!nativeCapabilities.includes(cap)) nativeCapabilities.push(cap);
++		} else if (validCapabilities.has(cap)) {
++			sharedCapabilities.push(cap);
++		} else {
+ 			throw new Error(`Invalid capability "${cap}" in plugin "${id}".`);
+ 		}
+ 	}
+ 
+-	warnDeprecatedPluginCapabilities(id, capabilities);
+-	const normalizedCapabilities = normalizePluginCapabilities(capabilities);
++	warnDeprecatedPluginCapabilities(id, sharedCapabilities);
++	const normalizedCapabilities = normalizePluginCapabilities(sharedCapabilities);
+ 
+ 	// Normalize hooks
+ 	const resolvedHooks = resolveHooks(hooks, id);
+@@ -224,6 +232,7 @@ function defineNativePlugin<TStorage extends PluginStorageConfig>(
+ 		id,
+ 		version,
+ 		capabilities: normalizedCapabilities,
++		...(nativeCapabilities.length > 0 && { nativeCapabilities }),
+ 		allowedHosts,
+ 		storage,
+ 		hooks: resolvedHooks,
+diff --git a/packages/core/src/plugins/index.ts b/packages/core/src/plugins/index.ts
+index 8a1231dc487d68d1a7bf723994ceecebbe1d9c29..da3cbc4a5010bab5173c4c5311acf28e3766bfd1 100644
+--- a/packages/core/src/plugins/index.ts
++++ b/packages/core/src/plugins/index.ts
+@@ -185,6 +185,16 @@ export type {
+ 	MediaAccessWithWrite,
+ 	MediaBytes,
+ 	MediaMetadataPatch,
++	NativePluginCapability,
++	SafeMediaAccess,
++	SafeMediaHostProfile,
++	SafeMediaOperationStatus,
++	SafeMediaReplaceRequest,
++	SafeMediaRestorableOriginal,
++	SafeMediaRestoreRequest,
++	SafeMediaResult,
++	SafeMediaRevision,
++	SafeMediaSupport,
+ 	HttpAccess,
+ 	LogAccess,
+ 	SiteInfo,
+diff --git a/packages/core/src/plugins/native-capabilities.ts b/packages/core/src/plugins/native-capabilities.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cefa6d7304798f400fb2bc40a3819a8442ae2d1
+--- /dev/null
++++ b/packages/core/src/plugins/native-capabilities.ts
+@@ -0,0 +1,45 @@
++/**
++ * Capabilities only native plugins may declare.
++ *
++ * They are not part of the shared manifest vocabulary in
++ * `@emdash-cms/plugin-types`, so registry and marketplace manifests, the
++ * sandboxed-format adapter and the plugin CLI all reject them as unknown.
++ * `definePlugin()` records them on `ResolvedPlugin.nativeCapabilities`, which
++ * no sandboxed loading path sets.
++ */
++
++/**
++ * `media:bytes:replace` grants `ctx.media.safe` on hosts with `safeMedia`:
++ * revision-fenced, same-geometry replacement and restore of retained originals.
++ */
++export const NATIVE_PLUGIN_CAPABILITIES = ["media:bytes:replace"] as const;
++
++export type NativePluginCapability = (typeof NATIVE_PLUGIN_CAPABILITIES)[number];
++
++export function isNativePluginCapability(value: string): value is NativePluginCapability {
++	return NATIVE_PLUGIN_CAPABILITIES.some((capability) => capability === value);
++}
++
++/**
++ * Refuse configuration that declares a native-only capability for a plugin
++ * that runs in the sandboxed format, whether in a sandbox or in-process.
++ */
++export function assertNoSandboxedNativeCapabilities(
++	descriptors: ReadonlyArray<{
++		id: string;
++		format?: "standard" | "native";
++		capabilities?: readonly string[];
++	}>,
++	sandboxed: boolean,
++): void {
++	for (const descriptor of descriptors) {
++		if (!sandboxed && descriptor.format !== "standard") continue;
++		const declared = (descriptor.capabilities ?? []).filter(isNativePluginCapability);
++		if (declared.length > 0) {
++			throw new Error(
++				`Plugin "${descriptor.id}" declares ${declared.join(", ")}, which only native plugins ` +
++					"may declare. Sandboxed-format plugins cannot receive this access, in a sandbox or in-process.",
++			);
++		}
++	}
++}
+diff --git a/packages/core/src/plugins/types.ts b/packages/core/src/plugins/types.ts
+index 4c70d4438aebb76eb711482a8ed1e312b452fe1a..659048a12aeb4f4dc8e978effe6f3b0e3800ee3c 100644
+--- a/packages/core/src/plugins/types.ts
++++ b/packages/core/src/plugins/types.ts
+@@ -50,7 +50,22 @@ import type { z } from "astro/zod";
+ // =============================================================================
+ 
+ import type { ContentFieldFilters } from "../content-list-query.js";
++import type { SafeMediaAccess } from "../media/safe/plugin-access.js";
+ import type { FieldType, FieldValidation, FieldWidgetOptions } from "../schema/types.js";
++import type { NativePluginCapability } from "./native-capabilities.js";
++
++export type {
++	SafeMediaAccess,
++	SafeMediaHostProfile,
++	SafeMediaOperationStatus,
++	SafeMediaReplaceRequest,
++	SafeMediaRestorableOriginal,
++	SafeMediaRestoreRequest,
++	SafeMediaResult,
++	SafeMediaRevision,
++	SafeMediaSupport,
++} from "../media/safe/plugin-access.js";
++export type { NativePluginCapability } from "./native-capabilities.js";
+ 
+ export type {
+ 	ContentFieldFilterScalar,
+@@ -895,6 +910,11 @@ export interface MediaAccess {
+ 	readBytes?(id: string, options?: { maxBytes?: number }): Promise<MediaBytes>;
+ 	/** Change only alt text, caption, or the complete focal-point pair. */
+ 	updateMetadata?(id: string, patch: MediaMetadataPatch): Promise<MediaItem>;
++	/**
++	 * Revision-fenced replacement and restore. Present only for native plugins
++	 * that declare `media:bytes:replace`, on hosts with `safeMedia` configured.
++	 */
++	safe?: SafeMediaAccess;
+ 
+ 	// Write operations (requires write:media) - optional on interface
+ 	getUploadUrl?(
+@@ -2148,8 +2168,8 @@ export interface PluginDefinition<TStorage extends PluginStorageConfig = PluginS
+ 	/** Plugin version (semver) */
+ 	version: string;
+ 
+-	/** Declared capabilities */
+-	capabilities?: PluginCapability[];
++	/** Declared capabilities, including native-only ones such as `media:bytes:replace` */
++	capabilities?: Array<PluginCapability | NativePluginCapability>;
+ 
+ 	/** Allowed hosts for network:request (wildcards supported: *.example.com) */
+ 	allowedHosts?: string[];
+@@ -2177,6 +2197,8 @@ export interface ResolvedPlugin<TStorage extends PluginStorageConfig = PluginSto
+ 	id: string;
+ 	version: string;
+ 	capabilities: PluginCapability[];
++	/** Native-only capabilities, set by `definePlugin()` and never by a sandboxed loading path. */
++	nativeCapabilities?: NativePluginCapability[];
+ 	allowedHosts: string[];
+ 	storage: TStorage;
+ 	hooks: ResolvedPluginHooks;
+diff --git a/packages/core/tests/integration/runtime/plugin-safe-media.test.ts b/packages/core/tests/integration/runtime/plugin-safe-media.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6166b449f4376b441eaba855f04d6a4dc3261c58
+--- /dev/null
++++ b/packages/core/tests/integration/runtime/plugin-safe-media.test.ts
+@@ -0,0 +1,153 @@
++/**
++ * `ctx.media.safe` reaches native plugin routes through the runtime's own
++ * wiring when `safeMedia` is configured, and nothing else receives it.
++ */
++
++import { randomUUID } from "node:crypto";
++import { mkdir, mkdtemp, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { NodeSqliteCompatDatabase as Database } from "#node-sqlite";
++
++import { MediaRepository } from "../../../src/database/repositories/media.js";
++import { EmDashRuntime } from "../../../src/emdash-runtime.js";
++import type { RuntimeDependencies } from "../../../src/emdash-runtime.js";
++import { adaptSandboxEntry } from "../../../src/plugins/adapt-sandbox-entry.js";
++import { definePlugin } from "../../../src/plugins/define-plugin.js";
++import type { PluginContext } from "../../../src/plugins/types.js";
++import { LocalStorage } from "../../../src/storage/local.js";
++
++const probe = {
++	handler: async (ctx: PluginContext & { input: unknown }) => {
++		const safe = ctx.media?.safe;
++		if (!safe) return { access: false };
++		const { mediaId } = ctx.input as { mediaId: string };
++		return { access: true, support: await safe.support(), revision: await safe.revision(mediaId) };
++	},
++};
++
++describe("EmDashRuntime safe-media access for plugin routes", () => {
++	let root: string;
++	let runtime: EmDashRuntime | undefined;
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-runtime-safe-media-"));
++		await mkdir(join(root, "uploads"), { recursive: true });
++	});
++
++	afterEach(async () => {
++		await runtime?.stopCron();
++		runtime = undefined;
++		await rm(root, { recursive: true, force: true });
++	});
++
++	async function start(safeMedia: boolean) {
++		const storage = new LocalStorage({ directory: join(root, "uploads"), baseUrl: "/media" });
++		const deps: RuntimeDependencies = {
++			config: {
++				// The runtime caches its database per entrypoint; only the safeMedia case needs the real name.
++				database: {
++					entrypoint: safeMedia ? "emdash/db/sqlite" : `test-safe-media-${randomUUID()}`,
++					config: {},
++					type: "sqlite",
++				},
++				storage: {
++					entrypoint: "emdash/storage/local",
++					config: { directory: join(root, "uploads") },
++				},
++				...(safeMedia && { safeMedia: { privateDirectory: join(root, "private") } }),
++			},
++			plugins: [
++				definePlugin({
++					id: "native-replacer",
++					version: "1.0.0",
++					capabilities: ["media:bytes:replace"],
++					routes: { probe },
++				}),
++				definePlugin({
++					id: "native-reader",
++					version: "1.0.0",
++					capabilities: ["media:read", "media:bytes:read"],
++					routes: { probe },
++				}),
++				adaptSandboxEntry(
++					{
++						routes: {
++							probe: (routeCtx, ctx) => probe.handler({ ...ctx, input: routeCtx.input } as never),
++						},
++					},
++					{
++						id: "sandboxed-reader",
++						version: "1.0.0",
++						entrypoint: "sandboxed-reader",
++						format: "standard",
++						capabilities: ["media:read", "media:bytes:read", "media:write"],
++					},
++				),
++			],
++			createDialect: () => new SqliteDialect({ database: new Database(join(root, "site.db")) }),
++			createStorage: () => storage,
++			sandboxEnabled: false,
++			sandboxedPluginEntries: [],
++			createSandboxRunner: null,
++		};
++		runtime = await EmDashRuntime.create(deps);
++		await storage.upload({
++			key: "01HZRUNTIME.png",
++			body: new Uint8Array([1]),
++			contentType: "image/png",
++		});
++		const media = await new MediaRepository(runtime.db).create({
++			filename: "photo.png",
++			mimeType: "image/png",
++			size: 1,
++			width: 2,
++			height: 2,
++			storageKey: "01HZRUNTIME.png",
++			status: "ready",
++		});
++		return media.id;
++	}
++
++	async function call(pluginId: string, mediaId: string) {
++		const result = await runtime!.handlePluginApiRoute(
++			pluginId,
++			"POST",
++			"/probe",
++			new Request(`http://test.local/_emdash/api/plugin/${pluginId}/probe`, {
++				method: "POST",
++				headers: { "content-type": "application/json" },
++				body: JSON.stringify({ mediaId }),
++			}),
++		);
++		expect(result.success).toBe(true);
++		return result.data as { access: boolean; support?: unknown; revision?: unknown };
++	}
++
++	it("gives the native plugin with the capability support discovery from the configured host", async () => {
++		const mediaId = await start(true);
++		const result = await call("native-replacer", mediaId);
++		expect(result).toMatchObject({
++			access: true,
++			support: {
++				protocol: 1,
++				profile: { runtime: "node", database: "sqlite", storage: "local", locks: "in-process" },
++				geometry: "unchanged",
++			},
++			revision: { mediaId, mimeType: "image/png", width: 2, height: 2 },
++		});
++		await expect(call("native-reader", mediaId)).resolves.toEqual({ access: false });
++		await expect(call("sandboxed-reader", mediaId)).resolves.toEqual({ access: false });
++	});
++
++	it("gives no plugin access when safeMedia is not configured", async () => {
++		const mediaId = await start(false);
++		for (const pluginId of ["native-replacer", "native-reader", "sandboxed-reader"]) {
++			await expect(call(pluginId, mediaId)).resolves.toEqual({ access: false });
++		}
++	});
++});
+diff --git a/packages/core/tests/unit/media/safe/native-access.test.ts b/packages/core/tests/unit/media/safe/native-access.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..eee8179655e069735358ec8e73a2754cf6ee33c6
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/native-access.test.ts
+@@ -0,0 +1,458 @@
++import { createHash } from "node:crypto";
++import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Kysely, SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { runMigrations } from "../../../../src/database/migrations/runner.js";
++import { MediaRepository } from "../../../../src/database/repositories/media.js";
++import type { Database } from "../../../../src/database/types.js";
++import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
++import type { SafeMediaPluginHost } from "../../../../src/media/safe/plugin-access.js";
++import { createSafeMediaPluginAccess } from "../../../../src/media/safe/plugin-access.js";
++import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
++import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { createMediaReplacementService } from "../../../../src/media/safe/replacement-service.js";
++import {
++	createSafeMedia,
++	describeSafeMediaHostProfile,
++} from "../../../../src/media/safe/runtime.js";
++import { createOutputValidator } from "../../../../src/media/safe/validate-output.js";
++import { adaptSandboxEntry } from "../../../../src/plugins/adapt-sandbox-entry.js";
++import { PluginContextFactory } from "../../../../src/plugins/context.js";
++import { definePlugin } from "../../../../src/plugins/define-plugin.js";
++import { pluginManifestSchema } from "../../../../src/plugins/manifest-schema.js";
++import { assertNoSandboxedNativeCapabilities } from "../../../../src/plugins/native-capabilities.js";
++import type { PluginContext } from "../../../../src/plugins/types.js";
++import { LocalStorage } from "../../../../src/storage/local.js";
++import { computeContentHash } from "../../../../src/utils/hash.js";
++import { inProcessDecoder, noisy, solid } from "./output-fixtures.js";
++
++const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
++const KEY = "01HZNATIVEACCESS.png";
++const SUPPORT: SafeMediaPluginHost["support"] = {
++	protocol: 1,
++	profile: { runtime: "node", database: "sqlite", storage: "local", locks: "in-process" },
++	formats: ["jpeg", "png", "webp"],
++	geometry: "unchanged",
++	limits: { maxBytes: 1024 * 1024, maxPixels: 1_000_000 },
++};
++
++describe("native safe-media access", () => {
++	let root: string;
++	let db: Kysely<Database>;
++	let active: LocalStorage;
++	let host: SafeMediaPluginHost;
++	let originalBytes: Uint8Array;
++	let optimized: Uint8Array;
++	let mediaId: string;
++
++	const factory = (withSafeMedia = true) =>
++		new PluginContextFactory({
++			db,
++			storage: active,
++			...(withSafeMedia && { safeMedia: host }),
++		});
++	const native = (capabilities: Parameters<typeof definePlugin>[0]["capabilities"]) =>
++		definePlugin({ id: "native-optimizer", version: "1.0.0", capabilities });
++	const sandboxedInProcess = (capabilities: string[]) =>
++		adaptSandboxEntry(
++			{ hooks: {}, routes: {} },
++			{
++				id: "sandboxed-optimizer",
++				version: "1.0.0",
++				entrypoint: "sandboxed-optimizer",
++				format: "standard",
++				capabilities,
++			},
++		);
++
++	const count = async (
++		table: "_emdash_media_revisions" | "_emdash_media_originals" | "_emdash_media_operations",
++	) =>
++		Number(
++			(
++				await db
++					.selectFrom(table)
++					.select((eb) => eb.fn.countAll().as("n"))
++					.executeTakeFirstOrThrow()
++			).n,
++		);
++	const snapshot = async () => ({
++		revisions: await count("_emdash_media_revisions"),
++		originals: await count("_emdash_media_originals"),
++		operations: await count("_emdash_media_operations"),
++		uploads: (await readdir(join(root, "uploads"))).toSorted(),
++		private: (await readdir(join(root, "private")).catch((): string[] => [])).toSorted(),
++		media: await db.selectFrom("media").selectAll().where("id", "=", mediaId).executeTakeFirst(),
++		served: sha(await readFile(join(root, "uploads", KEY))),
++	});
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-native-access-"));
++		await mkdir(join(root, "uploads"), { recursive: true });
++		db = new Kysely<Database>({
++			dialect: new SqliteDialect({ database: openNodeSqliteDatabase(join(root, "site.db")) }),
++		});
++		await runMigrations(db);
++		active = new LocalStorage({ directory: join(root, "uploads"), baseUrl: "/media" });
++		originalBytes = await noisy(64, 48, "png");
++		optimized = await solid(64, 48, "#2060e0").png().toBuffer();
++		await active.upload({ key: KEY, body: originalBytes, contentType: "image/png" });
++		const media = await new MediaRepository(db).create({
++			filename: "photo.png",
++			mimeType: "image/png",
++			size: originalBytes.byteLength,
++			width: 64,
++			height: 48,
++			storageKey: KEY,
++			contentHash: await computeContentHash(originalBytes),
++			status: "ready",
++		});
++		mediaId = media.id;
++		host = {
++			service: createMediaReplacementService({
++				db,
++				storage: active,
++				originals: createPrivateOriginalStore(
++					createLocalPrivateStorage({
++						directory: join(root, "private"),
++						publicDirectories: [join(root, "uploads")],
++					}),
++				),
++				validator: createOutputValidator({ decoder: inProcessDecoder }),
++			}),
++			support: SUPPORT,
++		};
++	});
++
++	afterEach(async () => {
++		await db.destroy();
++		await rm(root, { recursive: true, force: true });
++	});
++
++	describe("a native plugin declaring media:bytes:replace", () => {
++		it("discovers support and the active revision", async () => {
++			const safe = factory().createContext(native(["media:bytes:replace"])).media?.safe;
++			expect(safe).toBeDefined();
++			await expect(safe!.support()).resolves.toEqual(SUPPORT);
++			const revision = await safe!.revision(mediaId);
++			expect(revision).toMatchObject({
++				mediaId,
++				mimeType: "image/png",
++				size: originalBytes.byteLength,
++				width: 64,
++				height: 48,
++			});
++			expect(revision!.revisionId).toEqual(expect.any(String));
++			await expect(safe!.revision("missing")).resolves.toBeNull();
++		});
++
++		it("replaces and restores with receipts attributed to the plugin", async () => {
++			const media = factory().createContext(native(["media:bytes:replace"])).media!;
++			const safe = media.safe!;
++			const baseline = (await safe.revision(mediaId))!;
++
++			const replaced = await safe.replace({
++				mediaId,
++				operationId: "optimize-1",
++				expectedRevisionId: baseline.revisionId,
++				bytes: optimized,
++				expectedSha256: sha(optimized),
++			});
++			expect(replaced).toMatchObject({
++				ok: true,
++				replayed: false,
++				receipt: {
++					kind: "replace",
++					mediaId,
++					expectedRevisionId: baseline.revisionId,
++					candidateSha256: sha(optimized),
++					originalSha256: sha(originalBytes),
++					width: 64,
++					height: 48,
++				},
++			});
++			if (!replaced.ok) return;
++			expect(sha(await readFile(join(root, "uploads", KEY)))).toBe(sha(originalBytes));
++			const current = (await safe.revision(mediaId))!;
++			expect(current).toMatchObject({
++				revisionId: replaced.receipt.newRevisionId,
++				sha256: sha(optimized),
++				size: optimized.byteLength,
++			});
++			await expect(safe.operation(mediaId, "optimize-1")).resolves.toEqual({
++				state: "published",
++				kind: "replace",
++				receipt: replaced.receipt,
++			});
++			const journal = await db
++				.selectFrom("_emdash_media_operations")
++				.select(["created_by", "fingerprint"])
++				.where("operation_id", "=", "optimize-1")
++				.executeTakeFirstOrThrow();
++			expect(journal.created_by).toBe("plugin:native-optimizer");
++
++			await expect(safe.listRestorableOriginals(mediaId)).resolves.toEqual([
++				expect.objectContaining({
++					sha256: sha(originalBytes),
++					sourceRevisionId: baseline.revisionId,
++					replacedByRevisionId: replaced.receipt.newRevisionId,
++				}),
++			]);
++			const restored = await safe.restore({
++				mediaId,
++				operationId: "restore-1",
++				expectedRevisionId: replaced.receipt.newRevisionId,
++			});
++			expect(restored).toMatchObject({
++				ok: true,
++				receipt: { kind: "restore", candidateSha256: sha(originalBytes) },
++			});
++			if (!restored.ok) return;
++			const after = (await safe.revision(mediaId))!;
++			expect(after.revisionId).toBe(restored.receipt.newRevisionId);
++			expect(after.sha256).toBe(sha(originalBytes));
++			await expect(safe.operation(mediaId, "restore-1")).resolves.toMatchObject({
++				state: "published",
++				kind: "restore",
++				receipt: restored.receipt,
++			});
++		});
++
++		it("replays the stored receipt for a repeated operation without a second publication", async () => {
++			const safe = factory().createContext(native(["media:bytes:replace"])).media!.safe!;
++			const baseline = (await safe.revision(mediaId))!;
++			const request = {
++				mediaId,
++				operationId: "optimize-1",
++				expectedRevisionId: baseline.revisionId,
++				bytes: optimized,
++			};
++			const first = await safe.replace(request);
++			const before = await snapshot();
++			// A new context (another hook or route invocation) sees the same journal.
++			const again = await factory()
++				.createContext(native(["media:bytes:replace"]))
++				.media!.safe!.replace(request);
++			expect(first.ok && again.ok).toBe(true);
++			if (!first.ok || !again.ok) return;
++			expect(again.replayed).toBe(true);
++			expect(again.receipt).toEqual(first.receipt);
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("rejects a stale expected revision as a conflict and publishes nothing", async () => {
++			const safe = factory().createContext(native(["media:bytes:replace"])).media!.safe!;
++			const baseline = (await safe.revision(mediaId))!;
++			const published = await safe.replace({
++				mediaId,
++				operationId: "optimize-1",
++				expectedRevisionId: baseline.revisionId,
++				bytes: optimized,
++			});
++			expect(published.ok).toBe(true);
++			const before = (await safe.revision(mediaId))!;
++			const stale = await safe.replace({
++				mediaId,
++				operationId: "optimize-2",
++				expectedRevisionId: baseline.revisionId,
++				bytes: await solid(64, 48, "#e02060").png().toBuffer(),
++			});
++			expect(stale).toMatchObject({ ok: false, code: "CONFLICT" });
++			expect(await safe.revision(mediaId)).toEqual(before);
++		});
++
++		it("refuses a geometry change even when the request asks for any geometry", async () => {
++			const safe = factory().createContext(native(["media:bytes:replace"])).media!.safe!;
++			const baseline = (await safe.revision(mediaId))!;
++			const before = await snapshot();
++			const larger = await solid(128, 96, "#2060e0").png().toBuffer();
++			const smuggled = {
++				mediaId,
++				operationId: "resize-1",
++				expectedRevisionId: baseline.revisionId,
++				bytes: larger,
++				geometry: "any",
++				createdBy: "user-1",
++			};
++			const result = await safe.replace(smuggled);
++			expect(result).toMatchObject({ ok: false, code: "DIMENSIONS_CHANGED" });
++			expect(await safe.revision(mediaId)).toEqual(baseline);
++			const after = await snapshot();
++			expect({ ...after, operations: before.operations }).toEqual(before);
++			const journal = await db
++				.selectFrom("_emdash_media_operations")
++				.select(["state", "created_by"])
++				.where("operation_id", "=", "resize-1")
++				.executeTakeFirstOrThrow();
++			expect(journal).toEqual({ state: "rejected", created_by: "plugin:native-optimizer" });
++		});
++
++		it("cannot read or reuse operations started by another caller", async () => {
++			const baseline = (await host.service.getSourceRevision(mediaId))!;
++			const editor = await host.service.replace({
++				mediaId,
++				operationId: "shared-id",
++				expectedRevisionId: baseline.id,
++				bytes: optimized,
++				createdBy: "user-1",
++			});
++			expect(editor.ok).toBe(true);
++			const safe = factory().createContext(native(["media:bytes:replace"])).media!.safe!;
++			await expect(safe.operation(mediaId, "shared-id")).resolves.toBeNull();
++			const reused = await safe.replace({
++				mediaId,
++				operationId: "shared-id",
++				expectedRevisionId: baseline.id,
++				bytes: optimized,
++			});
++			expect(reused).toMatchObject({ ok: false, code: "CONFLICTING_OPERATION" });
++			const other = createSafeMediaPluginAccess(host, "other-plugin");
++			const mine = await safe.restore({
++				mediaId,
++				operationId: "restore-1",
++				expectedRevisionId: editor.ok ? editor.receipt.newRevisionId : "",
++			});
++			expect(mine.ok).toBe(true);
++			await expect(other.operation(mediaId, "restore-1")).resolves.toBeNull();
++		});
++	});
++
++	describe("callers that must not receive access", () => {
++		const ALL_MEDIA = ["media:read", "media:write", "media:bytes:read", "media:metadata:write"];
++
++		async function expectNoAccess(contexts: PluginContext[]) {
++			const before = await snapshot();
++			for (const context of contexts) {
++				expect(context.media?.safe).toBeUndefined();
++				expect(Object.keys(context.media ?? {})).not.toContain("safe");
++			}
++			expect(await snapshot()).toEqual(before);
++		}
++
++		it("gives a native plugin without the capability no access", async () => {
++			await expectNoAccess([
++				factory().createContext(native([])),
++				factory().createContext(native(["media:read", "media:write", "media:bytes:read"])),
++			]);
++		});
++
++		it("gives a native plugin no access on a host without safeMedia", async () => {
++			const context = factory(false).createContext(native(["media:bytes:replace"]));
++			expect(context.media).toBeUndefined();
++			await expectNoAccess([
++				context,
++				factory(false).createContext(native(["media:bytes:replace", "media:read"])),
++			]);
++		});
++
++		it("refuses a sandboxed-format plugin declaring the capability in-process", () => {
++			expect(() => sandboxedInProcess(["media:bytes:replace"])).toThrow(
++				"only native plugins may declare",
++			);
++		});
++
++		it("gives an in-process sandboxed-format plugin no access, even one built with definePlugin", async () => {
++			// A sandboxed-format default export may be a definePlugin() result; its own
++			// capabilities are ignored in favor of the descriptor.
++			const definition = native(["media:bytes:replace", ...ALL_MEDIA] as never);
++			expect(definition.nativeCapabilities).toEqual(["media:bytes:replace"]);
++			const adapted = adaptSandboxEntry(definition as never, {
++				id: "sandboxed-optimizer",
++				version: "1.0.0",
++				entrypoint: "sandboxed-optimizer",
++				format: "standard",
++				capabilities: ALL_MEDIA,
++			});
++			expect(adapted.nativeCapabilities).toBeUndefined();
++			await expectNoAccess([
++				factory().createContext(adapted),
++				factory().createContext(sandboxedInProcess(ALL_MEDIA)),
++			]);
++		});
++
++		it("refuses the capability in sandbox manifests and sandboxed configuration", () => {
++			const manifest = {
++				id: "sandboxed-optimizer",
++				version: "1.0.0",
++				capabilities: ["media:bytes:read", "media:bytes:replace"],
++				allowedHosts: [],
++				storage: {},
++				hooks: [],
++				routes: [],
++				admin: {},
++			};
++			expect(pluginManifestSchema.safeParse(manifest).success).toBe(false);
++			expect(
++				pluginManifestSchema.safeParse({ ...manifest, capabilities: ["media:bytes:read"] }).success,
++			).toBe(true);
++
++			const declares = (format: "standard" | "native") => ({
++				id: "optimizer",
++				format,
++				capabilities: ["media:bytes:replace"],
++			});
++			expect(() => assertNoSandboxedNativeCapabilities([declares("standard")], true)).toThrow(
++				"only native plugins may declare",
++			);
++			expect(() => assertNoSandboxedNativeCapabilities([declares("standard")], false)).toThrow(
++				"only native plugins may declare",
++			);
++			expect(() => assertNoSandboxedNativeCapabilities([declares("native")], false)).not.toThrow();
++		});
++
++		it("rejects an unknown capability for native plugins as before", () => {
++			expect(() => native(["media:bytes:rewrite" as never])).toThrow("Invalid capability");
++		});
++	});
++
++	describe("support description", () => {
++		it("derives the profile from the configured descriptors", async () => {
++			const safeMedia = createSafeMedia({
++				config: { privateDirectory: join(root, "private") },
++				storageDescriptor: {
++					entrypoint: "emdash/storage/local",
++					config: { directory: join(root, "uploads") },
++				},
++				databaseDescriptor: { entrypoint: "emdash/db/sqlite" },
++				rawStorage: active,
++				db,
++				resolveDb: () => db,
++				maxUploadSize: 4096,
++			});
++			expect(safeMedia.support).toEqual({
++				protocol: 1,
++				profile: { runtime: "node", database: "sqlite", storage: "local", locks: "in-process" },
++				formats: ["jpeg", "png", "webp"],
++				geometry: "unchanged",
++				limits: { maxBytes: 4096, maxPixels: 50_000_000 },
++			});
++			expect(
++				describeSafeMediaHostProfile({
++					databaseEntrypoint: "@emdash-cms/cloudflare/db/d1",
++					storageEntrypoint: "@emdash-cms/cloudflare/storage/r2",
++				}),
++			).toMatchObject({ database: "d1", storage: "r2" });
++			expect(
++				describeSafeMediaHostProfile({
++					databaseEntrypoint: undefined,
++					storageEntrypoint: "my-storage",
++				}),
++			).toMatchObject({ database: "unknown", storage: "unknown" });
++		});
++
++		it("cannot be altered by a plugin", async () => {
++			const safe = factory().createContext(native(["media:bytes:replace"])).media!.safe!;
++			const support = await safe.support();
++			expect(() => {
++				(support.profile as { database: string }).database = "postgres";
++			}).toThrow();
++			await expect(
++				createSafeMediaPluginAccess(host, "other-plugin").support(),
++			).resolves.toMatchObject({ profile: { database: "sqlite" } });
++		});
++	});
++});
