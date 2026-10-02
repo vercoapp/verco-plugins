@@ -3,8 +3,7 @@
 
   "slug": "image-optimizer",
   "name": "Image optimizer",
-  // Placeholder: set the publisher handle or DID before the first release.
-  "publisher": "did:plc:placeholder",
+  "publisher": "did:plc:x4pa534rsfytqfba2jrzs3zg", // verco.app
 
   "license": "MIT",
   "author": { "name": "Verco" },
