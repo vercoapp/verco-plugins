@@ -213,6 +213,11 @@ export function fakeHost(library: FakeMedia[]) {
     onNextCompareAndSet(hook: () => Promise<void>) {
       beforeCas = hook;
     },
+    /** Writes the scan state as another edition's invocation would have left it. */
+    seedState(run: ScanRun) {
+      revisions += 1;
+      kv.set(SCAN_STATE_KEY, { value: structuredClone(run), revision: revisions });
+    },
     /** Changes the scan state's revision without a counted call, as another invocation would. */
     touchState() {
       const entry = kv.get(SCAN_STATE_KEY);

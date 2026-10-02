@@ -1,10 +1,11 @@
 # image-optimizer
 
-A sandboxed EmDash plugin that reports images in the media library that are probably larger than they
+An EmDash plugin that reports images in the media library that are probably larger than they
 need to be. It is **read-only for now**: it never changes, replaces or deletes media.
 
-Published in the EmDash plugin registry as
+Published in the EmDash plugin registry as a sandboxed plugin,
 [`@verco.app/image-optimizer`](https://plugins.emdashcms.com/plugins/@verco.app/image-optimizer).
+A [native edition](#native-edition) of the same report is in this package.
 
 ## Install
 
@@ -12,6 +13,35 @@ On an EmDash site with a [sandbox runner](https://docs.emdashcms.com/deployment/
 configured, open **Registry** in the admin, search for "image optimizer" and install it. The consent
 dialog lists one permission, `media:read`: metadata of ready media, without file contents. Then open
 **Image report** and start a scan.
+
+## Native edition
+
+The same package also provides the report as a native plugin, for a site that cannot use the registry
+or its sandbox. It is **read-only like the registry edition**: it reports and never changes media. It
+has the same plugin ID, `media:read` capability, storage, settings, routes, report page and widget,
+so a site that switches between the editions keeps its scan results and settings.
+
+A native plugin **runs without isolation, in the site process**. EmDash's capability checks still gate
+what the plugin's context offers, but they are not a security boundary: the plugin's code has the same
+access as the site. Prefer the registry edition where a sandbox runner is available.
+
+Install the package in the site and register it in `astro.config.mjs`, in `plugins` (not `sandboxed`):
+
+```js
+import emdash from 'emdash/astro';
+import { imageOptimizerPlugin } from 'image-optimizer';
+
+export default defineConfig({
+  integrations: [emdash({ plugins: [imageOptimizerPlugin()] })],
+});
+```
+
+Register only one edition. EmDash does not reject two plugins with the same ID in its configuration,
+so a site with both the native edition and the registry edition would run two copies of the hooks. If
+you switch, remove one first.
+
+The package is not published to npm yet. The native edition is tested against the plugin context
+only, not yet on a running EmDash site.
 
 ## Why it is read-only
 
@@ -127,10 +157,14 @@ hook and route, because neither the Node runner nor the test hosts enforce it.
 ## Development
 
 ```sh
-pnpm test        # Validate the manifest and run the tests in the sandbox test host.
+pnpm test        # Validate the manifest and run the tests: the sandbox test host, and both editions' handlers.
 pnpm typecheck
-pnpm build       # Build the sandbox bundle with the EmDash plugin CLI.
+pnpm build       # Build the sandbox bundle with the EmDash plugin CLI, then the native entry with Vite.
 ```
+
+Both editions are wrappers over the shared code in `src/handlers.ts`: `src/plugin.ts` is the sandboxed
+entry and `src/native.ts` the native one. The sandboxed entry must not import anything native-only,
+and the native declarations must match `emdash-plugin.jsonc`; tests check both.
 
 Releases are published by the `verco.app` Atmosphere account, pinned by its DID in
 `emdash-plugin.jsonc`, so a publish from any other account fails.

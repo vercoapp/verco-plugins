@@ -12,13 +12,17 @@
   "homepage": "https://github.com/vercoapp/verco-plugins/tree/main/packages/image-optimizer#readme",
   "bugs": "https://github.com/vercoapp/verco-plugins/issues",
   "type": "module",
-  "main": "dist/index.mjs",
+  "main": "dist/native.mjs",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "types": "./dist/index.d.mts"
+      "types": "./dist/types/native.d.ts",
+      "import": "./dist/native.mjs"
     },
-    "./sandbox": "./dist/plugin.mjs"
+    "./sandbox": "./dist/plugin.mjs",
+    "./descriptor": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
   },
   "files": [
     "dist",
@@ -26,7 +30,7 @@
   ],
   "scripts": {
     "validate": "emdash-plugin validate",
-    "build": "emdash-plugin build",
+    "build": "emdash-plugin build && vite build -c vite.native.config.ts && tsc -p tsconfig.native.json",
     "dev": "emdash-plugin dev",
     "typecheck": "tsc --noEmit",
     "test": "emdash-plugin validate && vitest run",

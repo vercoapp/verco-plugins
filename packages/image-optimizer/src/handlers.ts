@@ -1,0 +1,173 @@
+/**
+ * The plugin's behaviour, written once for both editions. Every function takes the plugin context, so
+ * the sandboxed entry (`plugin.ts`, handlers of `(routeCtx, ctx)`) and the native entry (`native.ts`,
+ * handlers of one context) are thin wrappers over these. Nothing here imports native-only code.
+ */
+import type { BlockResponse } from '@emdash-cms/blocks/server';
+import type { CronEvent, MediaAfterUploadEvent, PluginContext, SandboxedRouteContext } from 'emdash/plugin';
+
+import {
+  ACTION_RESULTS_PAGE,
+  ACTION_START,
+  parseAdminRequest,
+  reportPage,
+  resolveLocale,
+  RESULTS_PER_PAGE,
+  SAVINGS_WIDGET,
+  savingsWidget,
+  SKIPPED_SHOWN,
+  type ReportView,
+} from './admin.ts';
+import {
+  advanceScan,
+  readScan,
+  recordUpload,
+  SCAN_TASK,
+  SCAN_TASK_SCHEDULE,
+  startScan,
+  type ScanDeps,
+  type ScanRun,
+  type StoredResult,
+} from './job.ts';
+import { resolveScanOptions, type ScanOptions } from './scanner.ts';
+
+function deps(ctx: PluginContext): ScanDeps {
+  const media = ctx.media;
+  if (!media) throw new Error('media:read is not available to this plugin');
+  return { kv: ctx.kv, media, results: results(ctx), log: ctx.log, now: () => new Date() };
+}
+
+function results(ctx: PluginContext): ScanDeps['results'] {
+  const collection = ctx.storage.results;
+  if (!collection) throw new Error('The results storage collection is not declared');
+  return collection;
+}
+
+/**
+ * Reads scan options from plugin settings, which use kilobytes and percent; unset settings take the
+ * defaults. Throws `RangeError` for values the scan cannot use. One bridge call.
+ */
+async function readOptions(ctx: PluginContext): Promise<ScanOptions> {
+  const settings = new Map((await ctx.settings.list()).map(({ key, value }) => [key, value]));
+  const [maxDimension, minSavingsKB, minSavingsPercent] = ['maxDimension', 'minSavingsKB', 'minSavingsPercent'].map(
+    (key) => settings.get(key),
+  );
+  const options: Partial<ScanOptions> = {};
+  if (maxDimension !== null && maxDimension !== undefined) options.maxDimension = maxDimension as number;
+  if (minSavingsKB !== null && minSavingsKB !== undefined) options.minSavingsBytes = (minSavingsKB as number) * 1000;
+  if (minSavingsPercent !== null && minSavingsPercent !== undefined) {
+    options.minSavingsRatio = (minSavingsPercent as number) / 100;
+  }
+  return resolveScanOptions(options);
+}
+
+type BeginOutcome =
+  | { ok: true; started: boolean; run: ScanRun }
+  | { ok: false; error: 'INVALID_SETTINGS' | 'CRON_UNAVAILABLE'; message?: string };
+
+/**
+ * Starts a scan, or reports the one already running, and leaves the work to the scheduled task.
+ * Four bridge calls: settings, reading and writing the state, and scheduling the task.
+ */
+async function beginScan(ctx: PluginContext): Promise<BeginOutcome> {
+  let options: ScanOptions;
+  try {
+    options = await readOptions(ctx);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return { ok: false, error: 'INVALID_SETTINGS', message: error.message };
+  }
+  if (!ctx.cron) return { ok: false, error: 'CRON_UNAVAILABLE' };
+
+  const { started, run } = await startScan(deps(ctx), options);
+  await ctx.cron.schedule(SCAN_TASK, { schedule: SCAN_TASK_SCHEDULE });
+  return { ok: true, started, run };
+}
+
+function beginToast(outcome: BeginOutcome): NonNullable<BlockResponse['toast']> {
+  if (!outcome.ok) {
+    return outcome.error === 'INVALID_SETTINGS'
+      ? { type: 'error', message: `The scan did not start. Check the plugin settings: ${outcome.message}.` }
+      : { type: 'error', message: 'The scan did not start: this site cannot run scheduled tasks.' };
+  }
+  if (!outcome.started) return { type: 'info', message: 'A scan is already running.' };
+  return { type: 'success', message: 'Scan started. It runs in the background, about 300 images a minute.' };
+}
+
+/** Three bridge calls, or four when the caller does not already have the run. */
+async function loadReport(
+  ctx: PluginContext,
+  cursor: string | null,
+  locale: string,
+  known?: ScanRun,
+): Promise<ReportView> {
+  const collection = results(ctx);
+  const flagged = (next: string | null) =>
+    collection.query({
+      where: { status: 'flagged' },
+      orderBy: { estimateBytes: 'desc' },
+      limit: RESULTS_PER_PAGE,
+      ...(next ? { cursor: next } : {}),
+    });
+
+  let page;
+  let continued = cursor !== null;
+  try {
+    page = await flagged(cursor);
+  } catch (error) {
+    if (cursor === null) throw error;
+    // A cursor from an earlier page can stop being valid; start again from the top.
+    page = await flagged(null);
+    continued = false;
+  }
+  const [skipped, skippedTotal, run] = await Promise.all([
+    collection.query({ where: { status: 'skipped' }, limit: SKIPPED_SHOWN }),
+    collection.count({ status: 'skipped' }),
+    known ?? readScan(ctx),
+  ]);
+
+  const asResults = (items: Array<{ id: string; data: unknown }>) =>
+    items.map(({ id, data }) => ({ id, data: data as StoredResult }));
+  return {
+    run,
+    results: { items: asResults(page.items), cursor: page.hasMore && page.cursor ? page.cursor : null },
+    skipped: { items: asResults(skipped.items), total: skippedTotal },
+    continued,
+    locale,
+  };
+}
+
+/** The scheduled task. At most TICK_CALL_BUDGET bridge calls to advance, plus one to cancel. */
+export async function handleCron(event: CronEvent, ctx: PluginContext): Promise<void> {
+  if (event.name !== SCAN_TASK) return;
+  const run = await advanceScan(deps(ctx));
+  if (!run || run.phase === 'complete') await ctx.cron?.cancel(SCAN_TASK);
+}
+
+export async function handleUpload(event: MediaAfterUploadEvent, ctx: PluginContext): Promise<void> {
+  await recordUpload(deps(ctx), event.media.id, await readOptions(ctx));
+}
+
+/** The Block Kit route behind the report page and the dashboard widget. */
+export async function handleAdmin(routeCtx: Pick<SandboxedRouteContext, 'input' | 'ui'>, ctx: PluginContext) {
+  const request = parseAdminRequest(routeCtx.input);
+  const locale = resolveLocale(routeCtx.ui?.locale);
+  if (request?.kind === 'page' && request.page === `widget:${SAVINGS_WIDGET}`) {
+    return savingsWidget(await readScan(ctx), locale);
+  }
+  if (request?.kind === 'action' && request.actionId === ACTION_START) {
+    const outcome = await beginScan(ctx);
+    const view = await loadReport(ctx, null, locale, outcome.ok ? outcome.run : undefined);
+    return reportPage(view, beginToast(outcome));
+  }
+  const cursor = request?.kind === 'action' && request.actionId === ACTION_RESULTS_PAGE ? request.cursor : null;
+  return reportPage(await loadReport(ctx, cursor, locale));
+}
+
+export async function handleScanStart(ctx: PluginContext) {
+  return beginScan(ctx);
+}
+
+export async function handleScanStatus(ctx: PluginContext) {
+  return { ok: true, run: await readScan(ctx) };
+}
