@@ -1,6 +1,6 @@
 // Create the disposable patched EmDash worktree (.upstream/emdash-pilot) from the pinned commit and
 // the patches in host/emdash/patches, or verify that the patches apply to a pristine tree with --check.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { checkout, git, patchDirectory, pilot, requirePinnedCheckout, root, target } from './lib/pilot.mjs';
 
@@ -15,7 +15,14 @@ if (!check && existsSync(pilot)) {
 }
 try {
   git(['worktree', 'add', '--detach', directory, target.commit], checkout);
-  for (const name of patches) git(['apply', '--index', '--whitespace=nowarn', join(patchDirectory, name)], directory);
+  const manifest = JSON.parse(readFileSync(join(patchDirectory, 'patches.json'), 'utf8'));
+  for (const name of patches) {
+    git(['apply', '--index', '--whitespace=nowarn', join(patchDirectory, name)], directory);
+    // The tree is a content hash: it proves the result is exactly what was exported.
+    const expected = manifest.patches.find((entry) => entry.name === name)?.resultingTree;
+    const actual = git(['write-tree'], directory).trim();
+    if (actual !== expected) throw new Error(`${name} produced tree ${actual}; patches.json records ${expected}.`);
+  }
   console.log(`${check ? 'Patches apply cleanly' : 'Created'} at ${target.commit.slice(0, 12)}: ${patches.join(', ') || 'no patches'}`);
   if (!check) console.log(`Install with: cd ${resolve(pilot)} && pnpm install --frozen-lockfile --ignore-scripts`);
 } finally {

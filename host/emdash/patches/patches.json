@@ -30,6 +30,29 @@
         "A\tpackages/core/tests/unit/media/safe/private-originals-exposure.test.ts",
         "A\tpackages/core/tests/unit/media/safe/private-originals.test.ts"
       ]
+    },
+    {
+      "name": "0002-bounded-output-validation.patch",
+      "tasks": [
+        "2.2"
+      ],
+      "relatedTests": [],
+      "scope": "Host validation of replacement output: header checks (format signature, animation, pixel limit, geometry), digest declaration, admission control over decoded pixels in flight, and a Sharp child-process full decode with a wall-time kill, exercised with real JPEG, PNG and WebP, hostile and mutated inputs on Node.",
+      "limits": "Only the Sharp child-process decoder exists; hosts without Sharp report no decoder and must leave mutation off. Not called from any route, native access or bridge yet. Pilot limits are measured on one machine. No workerd, Postgres or D1 run.",
+      "sha256": "5a02cbe00e7448f41ad6c0acae2357683a9641b0a5079b29f4c0901e571aff73",
+      "resultingTree": "b3d17fa434e02e470c42cda245327594199370da",
+      "files": [
+        "M\tpackages/core/package.json",
+        "A\tpackages/core/src/media/safe/admission.ts",
+        "A\tpackages/core/src/media/safe/decode-limits.ts",
+        "A\tpackages/core/src/media/safe/decoder.ts",
+        "A\tpackages/core/src/media/safe/sharp-child-decoder.ts",
+        "A\tpackages/core/src/media/safe/sniff.ts",
+        "A\tpackages/core/src/media/safe/validate-output.ts",
+        "A\tpackages/core/tests/unit/media/safe/output-fixtures.ts",
+        "A\tpackages/core/tests/unit/media/safe/output-validation.test.ts",
+        "M\tpnpm-lock.yaml"
+      ]
     }
   ]
 }

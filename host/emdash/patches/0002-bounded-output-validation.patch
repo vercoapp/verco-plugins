@@ -1,0 +1,1350 @@
+diff --git a/packages/core/package.json b/packages/core/package.json
+index f7dcf22acc74ffe90391237ccf552acafe76eb94..ce6e60ddeee0524b0678f20299c33d6c317d1df5 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -326,11 +326,15 @@
+     "@emdash-cms/auth-atproto": "workspace:>=0.2.8",
+     "astro": ">=6.0.0-beta.0",
+     "react": ">=18.0.0",
+-    "react-dom": ">=18.0.0"
++    "react-dom": ">=18.0.0",
++    "sharp": ">=0.33.0"
+   },
+   "peerDependenciesMeta": {
+     "@emdash-cms/auth-atproto": {
+       "optional": true
++    },
++    "sharp": {
++      "optional": true
+     }
+   },
+   "devDependencies": {
+@@ -348,6 +352,7 @@
+     "astro": "catalog:",
+     "image-size": "catalog:",
+     "publint": "catalog:",
++    "sharp": "0.35.4",
+     "tsdown": "catalog:",
+     "typescript": "catalog:",
+     "vite": "^6.0.0",
+diff --git a/packages/core/src/media/safe/admission.ts b/packages/core/src/media/safe/admission.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..49d3925f38b513eb9dab24b6fffeedaa5ac52a32
+--- /dev/null
++++ b/packages/core/src/media/safe/admission.ts
+@@ -0,0 +1,30 @@
++/**
++ * Admission control for decoded pixels in flight. A decode's memory grows with
++ * its pixel count, so the host admits a validation only while the sum stays
++ * within budget and otherwise refuses it as busy rather than queueing work
++ * behind an unbounded wait.
++ */
++
++export interface DecodeAdmission {
++	/** Returns a release function, or null if the budget cannot admit `pixels` now. */
++	tryAcquire(pixels: number): (() => void) | null;
++	inFlightPixels(): number;
++}
++
++export function createDecodeAdmission(maxInFlightPixels: number): DecodeAdmission {
++	let inFlight = 0;
++	return {
++		tryAcquire(pixels) {
++			if (!Number.isSafeInteger(pixels) || pixels <= 0 || inFlight + pixels > maxInFlightPixels)
++				return null;
++			inFlight += pixels;
++			let released = false;
++			return () => {
++				if (released) return;
++				released = true;
++				inFlight -= pixels;
++			};
++		},
++		inFlightPixels: () => inFlight,
++	};
++}
+diff --git a/packages/core/src/media/safe/decode-limits.ts b/packages/core/src/media/safe/decode-limits.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e4d3bc0b755a2966142692f9532503cbef93555
+--- /dev/null
++++ b/packages/core/src/media/safe/decode-limits.ts
+@@ -0,0 +1,49 @@
++/**
++ * Limits for validating replacement image output on the host.
++ *
++ * Defaults are the pilot limits measured in the Verco qualification: still
++ * JPEG, PNG and WebP, at most 50 MP, bounded wall time, and a cap on decoded
++ * pixels in flight so concurrent validations cannot exhaust memory. WebP
++ * decoding costs roughly 16-18 MiB per megapixel, which is what the in-flight
++ * cap protects. They are not production guarantees.
++ */
++
++export const SAFE_IMAGE_FORMATS = ["jpeg", "png", "webp"] as const;
++export type SafeImageFormat = (typeof SAFE_IMAGE_FORMATS)[number];
++
++export const FORMAT_MIME: Readonly<Record<SafeImageFormat, string>> = {
++	jpeg: "image/jpeg",
++	png: "image/png",
++	webp: "image/webp",
++};
++
++export interface DecodeLimits {
++	/** Largest output accepted, in bytes. */
++	maxBytes: number;
++	/** Largest decoded image, in pixels. Checked from the header before any decode. */
++	maxPixels: number;
++	/** Wall time for one full decode; the decoder must be able to terminate it. */
++	wallTimeMs: number;
++	/** Decoded pixels allowed across all validations running at once. */
++	maxInFlightPixels: number;
++}
++
++export const DEFAULT_DECODE_LIMITS: Readonly<DecodeLimits> = Object.freeze({
++	maxBytes: 50 * 1024 * 1024,
++	maxPixels: 50_000_000,
++	wallTimeMs: 5000,
++	maxInFlightPixels: 50_000_000,
++});
++
++export function resolveDecodeLimits(overrides: Partial<DecodeLimits> = {}): DecodeLimits {
++	const limits = { ...DEFAULT_DECODE_LIMITS, ...overrides };
++	for (const [name, value] of Object.entries(limits)) {
++		if (!Number.isSafeInteger(value) || value <= 0) {
++			throw new RangeError(`Decode limit ${name} must be a positive integer`);
++		}
++	}
++	if (limits.maxInFlightPixels < limits.maxPixels) {
++		throw new RangeError("maxInFlightPixels must admit at least one maximum-size image");
++	}
++	return limits;
++}
+diff --git a/packages/core/src/media/safe/decoder.ts b/packages/core/src/media/safe/decoder.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b17437b30476f7c44daf704aa56fd3f40f5e073d
+--- /dev/null
++++ b/packages/core/src/media/safe/decoder.ts
+@@ -0,0 +1,44 @@
++import type { SafeImageFormat } from "./decode-limits.js";
++
++export type ImageDecodeErrorCode =
++	| "UNDECODABLE"
++	| "CORRUPT"
++	| "TOO_MANY_PIXELS"
++	| "DECODE_TIMEOUT"
++	| "DECODER_CRASHED"
++	| "DECODER_UNAVAILABLE";
++
++export class ImageDecodeError extends Error {
++	constructor(
++		readonly code: ImageDecodeErrorCode,
++		message: string,
++		options?: { cause?: unknown },
++	) {
++		super(message, options);
++		this.name = "ImageDecodeError";
++	}
++}
++
++export interface DecodeRequest {
++	/** The format the host expects; the decoder reports what it actually found. */
++	format: SafeImageFormat;
++	maxPixels: number;
++	/** The decoder must be able to stop work and release resources after this. */
++	timeoutMs: number;
++}
++
++export interface DecodedImageInfo {
++	format: string;
++	width: number;
++	height: number;
++	frames: number;
++}
++
++/**
++ * Decodes every pixel of an image and reports what it found, discarding the
++ * pixels. Implementations must enforce `maxPixels` and `timeoutMs` themselves
++ * and throw {@link ImageDecodeError}.
++ */
++export interface FullImageDecoder {
++	decode(bytes: Uint8Array, request: DecodeRequest): Promise<DecodedImageInfo>;
++}
+diff --git a/packages/core/src/media/safe/sharp-child-decoder.ts b/packages/core/src/media/safe/sharp-child-decoder.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e245ba9835e6eda67c0e0e3dbd4661f5218a1efe
+--- /dev/null
++++ b/packages/core/src/media/safe/sharp-child-decoder.ts
+@@ -0,0 +1,166 @@
++/**
++ * Full-decode validation with Sharp in a child process (Node only).
++ *
++ * A decode already running cannot be cancelled in-process, so each one runs in
++ * a fresh process the host can kill at its wall-time limit. The child has an
++ * empty environment, runs from the temp directory, reads the image from stdin
++ * and writes one line of JSON. Sharp is an optional peer dependency: without it
++ * the decoder reports `DECODER_UNAVAILABLE` and the host leaves mutation off.
++ */
++
++import { spawn } from "node:child_process";
++import { createRequire } from "node:module";
++import { tmpdir } from "node:os";
++import { pathToFileURL } from "node:url";
++
++import type { DecodedImageInfo, DecodeRequest, FullImageDecoder } from "./decoder.js";
++import { ImageDecodeError } from "./decoder.js";
++
++const MAX_OUTPUT_BYTES = 64 * 1024;
++
++// Runs in the child. Pixels are decoded sequentially and discarded by stats().
++const CHILD_SOURCE = `
++const { sharp: sharpUrl, maxPixels } = JSON.parse(process.argv[1]);
++const chunks = [];
++for await (const chunk of process.stdin) chunks.push(chunk);
++const bytes = Buffer.concat(chunks);
++const reply = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
++const { default: sharp } = await import(sharpUrl);
++sharp.cache(false);
++const options = { limitInputPixels: maxPixels, failOn: "warning", sequentialRead: true };
++let metadata;
++try {
++  metadata = await sharp(bytes, options).metadata();
++} catch (error) {
++  reply({ ok: false, code: /pixel limit/.test(String(error && error.message)) ? "TOO_MANY_PIXELS" : "UNDECODABLE" });
++  process.exit(0);
++}
++try {
++  await sharp(bytes, options).stats();
++} catch (error) {
++  reply({ ok: false, code: /pixel limit/.test(String(error && error.message)) ? "TOO_MANY_PIXELS" : "CORRUPT" });
++  process.exit(0);
++}
++reply({ ok: true, format: metadata.format, width: metadata.width, height: metadata.height, frames: metadata.pages ?? 1 });
++`;
++
++export interface SharpChildDecoderOptions {
++	/** Absolute path of the sharp entry point; defaults to resolving the peer dependency. */
++	sharpPath?: string;
++	/** Called with the child's pid when it starts, for tests and diagnostics. */
++	onSpawn?: (pid: number | undefined) => void;
++}
++
++function resolveSharp(explicit: string | undefined): string | null {
++	if (explicit) return explicit;
++	try {
++		return createRequire(import.meta.url).resolve("sharp");
++	} catch {
++		return null;
++	}
++}
++
++function parseReply(output: string): DecodedImageInfo {
++	let reply: unknown;
++	try {
++		reply = JSON.parse(output.trim().split("\n").at(-1) ?? "");
++	} catch {
++		throw new ImageDecodeError("DECODER_CRASHED", "The image decoder returned no result");
++	}
++	if (typeof reply !== "object" || reply === null) {
++		throw new ImageDecodeError("DECODER_CRASHED", "The image decoder returned no result");
++	}
++	if (Reflect.get(reply, "ok") !== true) {
++		const code = Reflect.get(reply, "code");
++		if (code === "TOO_MANY_PIXELS" || code === "UNDECODABLE" || code === "CORRUPT") {
++			throw new ImageDecodeError(code, "The image could not be decoded");
++		}
++		throw new ImageDecodeError("DECODER_CRASHED", "The image decoder returned an unknown result");
++	}
++	const format: unknown = Reflect.get(reply, "format");
++	const width: unknown = Reflect.get(reply, "width");
++	const height: unknown = Reflect.get(reply, "height");
++	const frames: unknown = Reflect.get(reply, "frames");
++	if (
++		typeof format !== "string" ||
++		typeof width !== "number" ||
++		typeof height !== "number" ||
++		typeof frames !== "number"
++	) {
++		throw new ImageDecodeError("DECODER_CRASHED", "The image decoder returned an invalid result");
++	}
++	return { format, width, height, frames };
++}
++
++export function createSharpChildDecoder(options: SharpChildDecoderOptions = {}): FullImageDecoder {
++	return {
++		decode(bytes: Uint8Array, request: DecodeRequest): Promise<DecodedImageInfo> {
++			const sharpPath = resolveSharp(options.sharpPath);
++			if (!sharpPath) {
++				return Promise.reject(
++					new ImageDecodeError("DECODER_UNAVAILABLE", "Sharp is not installed"),
++				);
++			}
++			return new Promise((resolve, reject) => {
++				const child = spawn(
++					process.execPath,
++					[
++						"--input-type=module",
++						"-e",
++						CHILD_SOURCE,
++						JSON.stringify({ sharp: pathToFileURL(sharpPath).href, maxPixels: request.maxPixels }),
++					],
++					{ cwd: tmpdir(), env: {}, stdio: ["pipe", "pipe", "ignore"] },
++				);
++				options.onSpawn?.(child.pid);
++				let output = "";
++				let settled = false;
++				const finish = (action: () => void) => {
++					if (settled) return;
++					settled = true;
++					clearTimeout(timer);
++					action();
++				};
++				const timer = setTimeout(() => {
++					child.kill("SIGKILL");
++					finish(() =>
++						reject(
++							new ImageDecodeError("DECODE_TIMEOUT", "Image validation exceeded its time limit"),
++						),
++					);
++				}, request.timeoutMs);
++
++				child.stdout.on("data", (chunk: Buffer) => {
++					if (output.length < MAX_OUTPUT_BYTES) output += chunk.toString("utf8");
++				});
++				child.on("error", (error) =>
++					finish(() =>
++						reject(
++							new ImageDecodeError("DECODER_UNAVAILABLE", "The image decoder could not start", {
++								cause: error,
++							}),
++						),
++					),
++				);
++				child.on("close", (code, signal) =>
++					finish(() => {
++						if (code !== 0 || signal) {
++							reject(
++								new ImageDecodeError("DECODER_CRASHED", "The image decoder stopped unexpectedly"),
++							);
++							return;
++						}
++						try {
++							resolve(parseReply(output));
++						} catch (error) {
++							reject(error);
++						}
++					}),
++				);
++				// A child that exits before reading stdin raises EPIPE; its close event reports the outcome.
++				child.stdin.on("error", () => undefined);
++				child.stdin.end(bytes);
++			});
++		},
++	};
++}
+diff --git a/packages/core/src/media/safe/sniff.ts b/packages/core/src/media/safe/sniff.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0da900c3b1a36995fdf106ab08865ba17cc7577b
+--- /dev/null
++++ b/packages/core/src/media/safe/sniff.ts
+@@ -0,0 +1,136 @@
++/**
++ * Cheap, bounded inspection of image headers. Nothing here decodes pixels; it
++ * lets the host refuse the wrong format, animation and oversized images before
++ * any decoder runs, and gives the later full decode an expected result.
++ */
++
++import { imageSize } from "image-size";
++
++export type SniffedFormat =
++	| "jpeg"
++	| "png"
++	| "webp"
++	| "gif"
++	| "avif"
++	| "heic"
++	| "tiff"
++	| "bmp"
++	| "ico"
++	| "jxl"
++	| "svg"
++	| "unknown";
++
++const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
++const MAX_CHUNKS = 512;
++
++function startsWith(bytes: Uint8Array, signature: readonly number[], offset = 0): boolean {
++	return signature.every((value, index) => bytes[offset + index] === value);
++}
++
++function ascii(bytes: Uint8Array, start: number, length: number): string {
++	let out = "";
++	for (let index = start; index < Math.min(start + length, bytes.length); index++) {
++		out += String.fromCharCode(bytes[index]);
++	}
++	return out;
++}
++
++export function sniffFormat(bytes: Uint8Array): SniffedFormat {
++	if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "jpeg";
++	if (startsWith(bytes, PNG_SIGNATURE)) return "png";
++	if (ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP") return "webp";
++	const head = ascii(bytes, 0, 6);
++	if (head === "GIF87a" || head === "GIF89a") return "gif";
++	if (ascii(bytes, 4, 4) === "ftyp") {
++		const brand = ascii(bytes, 8, 4);
++		if (brand === "avif" || brand === "avis") return "avif";
++		if (["heic", "heix", "hevc", "hevx", "mif1", "msf1"].includes(brand)) return "heic";
++	}
++	if (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a]))
++		return "tiff";
++	if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "bmp";
++	if (startsWith(bytes, [0x00, 0x00, 0x01, 0x00])) return "ico";
++	if (
++		startsWith(bytes, [0xff, 0x0a]) ||
++		startsWith(bytes, [0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20])
++	)
++		return "jxl";
++	const text = ascii(bytes, 0, 256).trimStart().toLowerCase();
++	if (text.startsWith("<svg") || (text.startsWith("<?xml") && text.includes("<svg"))) return "svg";
++	return "unknown";
++}
++
++function u32(bytes: Uint8Array, offset: number): number {
++	return (
++		((bytes[offset] << 24) |
++			(bytes[offset + 1] << 16) |
++			(bytes[offset + 2] << 8) |
++			bytes[offset + 3]) >>>
++		0
++	);
++}
++
++function u32le(bytes: Uint8Array, offset: number): number {
++	return (
++		(bytes[offset] |
++			(bytes[offset + 1] << 8) |
++			(bytes[offset + 2] << 16) |
++			(bytes[offset + 3] << 24)) >>>
++		0
++	);
++}
++
++/** An APNG declares itself with an `acTL` chunk before the first `IDAT`. */
++export function isAnimatedPng(bytes: Uint8Array): boolean {
++	let offset = 8;
++	for (let chunk = 0; chunk < MAX_CHUNKS && offset + 8 <= bytes.length; chunk++) {
++		const length = u32(bytes, offset);
++		const type = ascii(bytes, offset + 4, 4);
++		if (type === "acTL") return true;
++		if (type === "IDAT" || type === "IEND") return false;
++		offset += 12 + length;
++	}
++	return false;
++}
++
++/** Animated WebP sets the VP8X animation flag and carries `ANIM` / `ANMF` chunks. */
++export function isAnimatedWebp(bytes: Uint8Array): boolean {
++	let offset = 12;
++	for (let chunk = 0; chunk < MAX_CHUNKS && offset + 8 <= bytes.length; chunk++) {
++		const type = ascii(bytes, offset, 4);
++		const length = u32le(bytes, offset + 4);
++		if (type === "ANIM" || type === "ANMF") return true;
++		if (type === "VP8X" && ((bytes[offset + 8] ?? 0) & 0x02) !== 0) return true;
++		offset += 8 + length + (length % 2);
++	}
++	return false;
++}
++
++export function isAnimated(format: SniffedFormat, bytes: Uint8Array): boolean {
++	if (format === "png") return isAnimatedPng(bytes);
++	if (format === "webp") return isAnimatedWebp(bytes);
++	return format === "gif";
++}
++
++export interface HeaderDimensions {
++	width: number;
++	height: number;
++}
++
++/** Stored-pixel dimensions from the header (EXIF orientation is not applied). Null if unreadable. */
++export function readHeaderDimensions(bytes: Uint8Array): HeaderDimensions | null {
++	try {
++		const size = imageSize(bytes);
++		if (
++			!Number.isInteger(size.width) ||
++			!Number.isInteger(size.height) ||
++			size.width <= 0 ||
++			size.height <= 0
++		) {
++			return null;
++		}
++		return { width: size.width, height: size.height };
++	} catch {
++		return null;
++	}
++}
+diff --git a/packages/core/src/media/safe/validate-output.ts b/packages/core/src/media/safe/validate-output.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..643d3cc6dc6c9561e068301b336938a9d6f25cff
+--- /dev/null
++++ b/packages/core/src/media/safe/validate-output.ts
+@@ -0,0 +1,167 @@
++/**
++ * Host-side validation of replacement image output.
++ *
++ * The plugin never decodes: the host checks the bytes it is about to publish.
++ * Cheap checks run first and refuse the wrong format, animation, oversized
++ * and wrong-geometry output from the header alone. Only output that passes
++ * them is admitted to a full decode, which reports what the decoder actually
++ * found and which must agree with the header.
++ */
++
++import { normalizeMime } from "../mime.js";
++import type { DecodeAdmission } from "./admission.js";
++import { createDecodeAdmission } from "./admission.js";
++import type { DecodeLimits, SafeImageFormat } from "./decode-limits.js";
++import { FORMAT_MIME, resolveDecodeLimits, SAFE_IMAGE_FORMATS } from "./decode-limits.js";
++import type { FullImageDecoder } from "./decoder.js";
++import { ImageDecodeError } from "./decoder.js";
++import { sha256Hex } from "./digest.js";
++import { isAnimated, readHeaderDimensions, sniffFormat } from "./sniff.js";
++
++export type OutputRejectionCode =
++	| "EMPTY"
++	| "TOO_LARGE_BYTES"
++	| "UNDECODABLE"
++	| "UNSUPPORTED_FORMAT"
++	| "WRONG_FORMAT"
++	| "ANIMATED"
++	| "TOO_MANY_PIXELS"
++	| "DIMENSIONS_CHANGED"
++	| "SOURCE_GEOMETRY_UNKNOWN"
++	| "CORRUPT"
++	| "DIGEST_MISMATCH"
++	| "DECODE_TIMEOUT"
++	| "DECODER_CRASHED"
++	| "DECODER_UNAVAILABLE"
++	| "BUSY";
++
++export interface ReplacementSource {
++	mimeType: string;
++	width: number | null;
++	height: number | null;
++}
++
++export type OutputValidation =
++	| {
++			ok: true;
++			format: SafeImageFormat;
++			mimeType: string;
++			width: number;
++			height: number;
++			size: number;
++			sha256: string;
++	  }
++	| { ok: false; code: OutputRejectionCode; message: string; retryable: boolean };
++
++const MESSAGES: Readonly<Record<OutputRejectionCode, string>> = {
++	EMPTY: "The output is empty.",
++	TOO_LARGE_BYTES: "The output exceeds the size limit.",
++	UNDECODABLE: "The output is not a readable image.",
++	UNSUPPORTED_FORMAT: "The output or source format is not supported for replacement.",
++	WRONG_FORMAT: "The output format differs from the source format.",
++	ANIMATED: "Animated images are not supported.",
++	TOO_MANY_PIXELS: "The output exceeds the pixel limit.",
++	DIMENSIONS_CHANGED: "The output dimensions differ from the source.",
++	SOURCE_GEOMETRY_UNKNOWN: "The source dimensions are unknown.",
++	CORRUPT: "The output failed full decoding.",
++	DIGEST_MISMATCH: "The output bytes do not match the digest the caller declared.",
++	DECODE_TIMEOUT: "Validation exceeded its time limit.",
++	DECODER_CRASHED: "The image decoder stopped unexpectedly.",
++	DECODER_UNAVAILABLE: "No image decoder is available on this host.",
++	BUSY: "The host is validating other images; retry shortly.",
++};
++
++function rejection(code: OutputRejectionCode): OutputValidation {
++	return { ok: false, code, message: MESSAGES[code], retryable: code === "BUSY" };
++}
++
++function formatOfMime(mimeType: string): SafeImageFormat | null {
++	const mime = normalizeMime(mimeType);
++	return (
++		SAFE_IMAGE_FORMATS.find((format) => FORMAT_MIME[format] === mime) ??
++		(mime === "image/jpg" ? "jpeg" : null)
++	);
++}
++
++export interface ValidateOptions {
++	/**
++	 * SHA-256 of the bytes the caller produced. A full decode proves the image is
++	 * well-formed, not that its pixels are intact: lossy WebP and JPEG decode
++	 * damaged data into garbage without error. Callers that can state what they
++	 * sent should, so transit corruption is caught.
++	 */
++	expectedSha256?: string;
++}
++
++export interface OutputValidatorOptions {
++	decoder: FullImageDecoder;
++	limits?: Partial<DecodeLimits>;
++	/** Share one admission across validators so the in-flight budget is global. */
++	admission?: DecodeAdmission;
++}
++
++export function createOutputValidator(options: OutputValidatorOptions) {
++	const limits = resolveDecodeLimits(options.limits);
++	const admission = options.admission ?? createDecodeAdmission(limits.maxInFlightPixels);
++
++	return {
++		limits,
++		async validate(
++			bytes: Uint8Array,
++			source: ReplacementSource,
++			validation: ValidateOptions = {},
++		): Promise<OutputValidation> {
++			const sourceFormat = formatOfMime(source.mimeType);
++			if (!sourceFormat) return rejection("UNSUPPORTED_FORMAT");
++			if (!source.width || !source.height) return rejection("SOURCE_GEOMETRY_UNKNOWN");
++			if (bytes.byteLength === 0) return rejection("EMPTY");
++			if (bytes.byteLength > limits.maxBytes) return rejection("TOO_LARGE_BYTES");
++
++			const sha256 = await sha256Hex(bytes);
++			if (validation.expectedSha256 !== undefined && validation.expectedSha256 !== sha256)
++				return rejection("DIGEST_MISMATCH");
++
++			const sniffed = sniffFormat(bytes);
++			if (sniffed === "unknown") return rejection("UNDECODABLE");
++			if (!(SAFE_IMAGE_FORMATS as readonly string[]).includes(sniffed))
++				return rejection("UNSUPPORTED_FORMAT");
++			if (sniffed !== sourceFormat) return rejection("WRONG_FORMAT");
++			if (isAnimated(sniffed, bytes)) return rejection("ANIMATED");
++
++			const header = readHeaderDimensions(bytes);
++			if (!header) return rejection("UNDECODABLE");
++			const pixels = header.width * header.height;
++			if (pixels > limits.maxPixels) return rejection("TOO_MANY_PIXELS");
++			if (header.width !== source.width || header.height !== source.height)
++				return rejection("DIMENSIONS_CHANGED");
++
++			const release = admission.tryAcquire(pixels);
++			if (!release) return rejection("BUSY");
++			try {
++				const decoded = await options.decoder.decode(bytes, {
++					format: sourceFormat,
++					maxPixels: limits.maxPixels,
++					timeoutMs: limits.wallTimeMs,
++				});
++				if (decoded.format !== sourceFormat) return rejection("WRONG_FORMAT");
++				if (decoded.frames > 1) return rejection("ANIMATED");
++				if (decoded.width !== header.width || decoded.height !== header.height)
++					return rejection("DIMENSIONS_CHANGED");
++				return {
++					ok: true,
++					format: sourceFormat,
++					mimeType: FORMAT_MIME[sourceFormat],
++					width: decoded.width,
++					height: decoded.height,
++					size: bytes.byteLength,
++					sha256,
++				};
++			} catch (error) {
++				if (error instanceof ImageDecodeError) return rejection(error.code);
++				throw error;
++			} finally {
++				release();
++			}
++		},
++	};
++}
+diff --git a/packages/core/tests/unit/media/safe/output-fixtures.ts b/packages/core/tests/unit/media/safe/output-fixtures.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..02d39ff1c6a1ced19ec82c0edf2b6cbe573864ef
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/output-fixtures.ts
+@@ -0,0 +1,119 @@
++import { crc32 } from "node:zlib";
++
++import sharp from "sharp";
++
++import type { DecodedImageInfo, FullImageDecoder } from "../../../../src/media/safe/decoder.js";
++import { ImageDecodeError } from "../../../../src/media/safe/decoder.js";
++
++export const SOURCE = { width: 64, height: 48 } as const;
++
++export function solid(width: number, height: number, background = "#3070c0") {
++	return sharp({ create: { width, height, channels: 3, background } });
++}
++
++/** Photographic-ish content so that compressed sizes are realistic. */
++export async function noisy(width: number, height: number, format: "jpeg" | "png" | "webp") {
++	const data = Buffer.alloc(width * height * 3);
++	let state = 0x9e3779b9;
++	for (let index = 0; index < data.length; index++) {
++		state ^= state << 13;
++		state ^= state >>> 17;
++		state ^= state << 5;
++		data[index] = ((index % (width * 3)) / 3 + ((state >>> 0) % 24)) & 255;
++	}
++	const image = sharp(data, { raw: { width, height, channels: 3 } });
++	return format === "jpeg"
++		? image.jpeg().toBuffer()
++		: format === "png"
++			? image.png().toBuffer()
++			: image.webp().toBuffer();
++}
++
++export async function stills(width = SOURCE.width, height = SOURCE.height) {
++	return {
++		jpeg: await solid(width, height).jpeg().toBuffer(),
++		png: await solid(width, height).png().toBuffer(),
++		webp: await solid(width, height).webp().toBuffer(),
++	};
++}
++
++/** Frames must differ or the encoder collapses them into one still image. */
++export async function animatedWebp(width = SOURCE.width, height = SOURCE.height) {
++	const frames = [
++		await solid(width, height, "#c03030").png().toBuffer(),
++		await solid(width, height, "#30c030").png().toBuffer(),
++	];
++	return sharp(frames, { join: { animated: true } })
++		.webp({ loop: 0, delay: [100, 100] })
++		.toBuffer();
++}
++
++export async function animatedGif(width = SOURCE.width, height = SOURCE.height) {
++	const frames = [
++		await solid(width, height, "#c03030").png().toBuffer(),
++		await solid(width, height, "#30c030").png().toBuffer(),
++	];
++	return sharp(frames, { join: { animated: true } })
++		.gif({ loop: 0, delay: [100, 100] })
++		.toBuffer();
++}
++
++/** A PNG that declares animation by carrying an `acTL` chunk after IHDR. */
++export function withAnimationControl(png: Uint8Array): Uint8Array {
++	const body = Buffer.alloc(8);
++	body.writeUInt32BE(2, 0); // frames
++	body.writeUInt32BE(0, 4); // plays
++	const type = Buffer.from("acTL");
++	const chunk = Buffer.alloc(12 + body.length);
++	chunk.writeUInt32BE(body.length, 0);
++	type.copy(chunk, 4);
++	body.copy(chunk, 8);
++	chunk.writeUInt32BE(crc32(Buffer.concat([type, body])), 8 + body.length);
++	const ihdrEnd = 8 + 12 + 13;
++	return Buffer.concat([png.subarray(0, ihdrEnd), chunk, png.subarray(ihdrEnd)]);
++}
++
++/** The same decode the child process performs, in-process, for fast property tests. */
++export const inProcessDecoder: FullImageDecoder = {
++	async decode(bytes, request): Promise<DecodedImageInfo> {
++		const options = {
++			limitInputPixels: request.maxPixels,
++			failOn: "warning" as const,
++			sequentialRead: true,
++		};
++		let metadata;
++		try {
++			metadata = await sharp(bytes, options).metadata();
++		} catch (error) {
++			throw new ImageDecodeError(
++				/pixel limit/.test(String(error)) ? "TOO_MANY_PIXELS" : "UNDECODABLE",
++				"header",
++			);
++		}
++		try {
++			await sharp(bytes, options).stats();
++		} catch (error) {
++			throw new ImageDecodeError(
++				/pixel limit/.test(String(error)) ? "TOO_MANY_PIXELS" : "CORRUPT",
++				"body",
++			);
++		}
++		return {
++			format: metadata.format,
++			width: metadata.width,
++			height: metadata.height,
++			frames: metadata.pages ?? 1,
++		};
++	},
++};
++
++/** Deterministic xorshift for reproducible mutation tests. */
++export function prng(seed: number) {
++	let state = seed >>> 0 || 1;
++	return () => {
++		state ^= state << 13;
++		state ^= state >>> 17;
++		state ^= state << 5;
++		return (state >>> 0) / 0x100000000;
++	};
++}
+diff --git a/packages/core/tests/unit/media/safe/output-validation.test.ts b/packages/core/tests/unit/media/safe/output-validation.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d798d83b3892b2d0e63bd4cf6e76ad23b0f321ef
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/output-validation.test.ts
+@@ -0,0 +1,531 @@
++import { createHash } from "node:crypto";
++import { mkdtemp, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import sharp from "sharp";
++import { describe, expect, it, vi } from "vitest";
++
++import { createDecodeAdmission } from "../../../../src/media/safe/admission.js";
++import type { FullImageDecoder } from "../../../../src/media/safe/decoder.js";
++import { ImageDecodeError } from "../../../../src/media/safe/decoder.js";
++import { createSharpChildDecoder } from "../../../../src/media/safe/sharp-child-decoder.js";
++import type { OutputRejectionCode } from "../../../../src/media/safe/validate-output.js";
++import { createOutputValidator } from "../../../../src/media/safe/validate-output.js";
++import {
++	animatedGif,
++	animatedWebp,
++	inProcessDecoder,
++	noisy,
++	prng,
++	SOURCE,
++	solid,
++	stills,
++	withAnimationControl,
++} from "./output-fixtures.js";
++
++const childDecoder = createSharpChildDecoder();
++const source = (
++	mimeType: string,
++	width: number | null = SOURCE.width,
++	height: number | null = SOURCE.height,
++) => ({ mimeType, width, height });
++const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" } as const;
++
++async function codeOf(
++	bytes: Uint8Array,
++	mimeType: string,
++	options: {
++		decoder?: FullImageDecoder;
++		limits?: Parameters<typeof createOutputValidator>[0]["limits"];
++		width?: number;
++		height?: number;
++	} = {},
++): Promise<OutputRejectionCode | "OK"> {
++	const validator = createOutputValidator({
++		decoder: options.decoder ?? childDecoder,
++		limits: options.limits,
++	});
++	const result = await validator.validate(
++		bytes,
++		source(mimeType, options.width ?? SOURCE.width, options.height ?? SOURCE.height),
++	);
++	return result.ok ? "OK" : result.code;
++}
++
++/** A decoder that must never run: proves the header checks refuse before any decode. */
++function forbiddenDecoder(): FullImageDecoder & { calls: number } {
++	const decoder = {
++		calls: 0,
++		async decode(): Promise<never> {
++			decoder.calls++;
++			throw new Error("The decoder must not run for this input");
++		},
++	};
++	return decoder;
++}
++
++describe("valid output", () => {
++	it.each(["jpeg", "png", "webp"] as const)(
++		"accepts a still %s of unchanged dimensions after a full decode",
++		async (format) => {
++			const bytes = (await stills())[format];
++			const validator = createOutputValidator({ decoder: childDecoder });
++			const result = await validator.validate(bytes, source(MIME[format]));
++			expect(result).toMatchObject({
++				ok: true,
++				format,
++				mimeType: MIME[format],
++				width: 64,
++				height: 48,
++				size: bytes.byteLength,
++			});
++			expect(result.ok && result.sha256).toMatch(/^[0-9a-f]{64}$/);
++		},
++	);
++
++	it("accepts the image/jpg alias and a MIME type with parameters", async () => {
++		const { jpeg } = await stills();
++		expect(await codeOf(jpeg, "image/jpg", { decoder: inProcessDecoder })).toBe("OK");
++		expect(await codeOf(jpeg, "IMAGE/JPEG; charset=binary", { decoder: inProcessDecoder })).toBe(
++			"OK",
++		);
++	});
++
++	it("compares stored-pixel dimensions, so an EXIF orientation tag does not change geometry", async () => {
++		const oriented = await solid(64, 48).jpeg().withMetadata({ orientation: 6 }).toBuffer();
++		expect(await codeOf(oriented, "image/jpeg", { decoder: inProcessDecoder })).toBe("OK");
++		expect(
++			await codeOf(oriented, "image/jpeg", { decoder: inProcessDecoder, width: 48, height: 64 }),
++		).toBe("DIMENSIONS_CHANGED");
++	});
++});
++
++describe("malformed output", () => {
++	it("rejects empty and non-image bytes without decoding", async () => {
++		const decoder = forbiddenDecoder();
++		expect(await codeOf(new Uint8Array(0), "image/png", { decoder })).toBe("EMPTY");
++		expect(
++			await codeOf(new TextEncoder().encode("definitely not an image"), "image/png", { decoder }),
++		).toBe("UNDECODABLE");
++		expect(await codeOf(new Uint8Array(4096), "image/png", { decoder })).toBe("UNDECODABLE");
++		expect(decoder.calls).toBe(0);
++	});
++
++	it.each(["jpeg", "png", "webp"] as const)("rejects a truncated %s", async (format) => {
++		const bytes = await noisy(64, 48, format);
++		for (const fraction of [0.3, 0.6, 0.9]) {
++			expect(["UNDECODABLE", "CORRUPT"]).toContain(
++				await codeOf(bytes.subarray(0, Math.floor(bytes.length * fraction)), MIME[format], {
++					decoder: childDecoder,
++				}),
++			);
++		}
++	});
++
++	it.each(["jpeg", "png", "webp"] as const)(
++		"rejects a damaged %s when the caller declares the digest it sent",
++		async (format) => {
++			const original = await noisy(64, 48, format);
++			const bytes = Buffer.from(original);
++			const start = Math.floor(bytes.length * 0.5);
++			for (let index = start; index < Math.min(start + 48, bytes.length); index++)
++				bytes[index] ^= 0xa5;
++			const validator = createOutputValidator({ decoder: childDecoder });
++			const result = await validator.validate(bytes, source(MIME[format]), {
++				expectedSha256: createHash("sha256").update(original).digest("hex"),
++			});
++			expect(result).toMatchObject({ ok: false, code: "DIGEST_MISMATCH" });
++		},
++	);
++
++	it("documents that decoding alone cannot prove lossy pixel data is intact", async () => {
++		// Damage inside entropy-coded data often still decodes. PNG's checksums catch it; WebP and JPEG may not.
++		const accepted: string[] = [];
++		for (const format of ["jpeg", "webp"] as const) {
++			const original = await noisy(64, 48, format);
++			for (let attempt = 0; attempt < 40; attempt++) {
++				const bytes = Buffer.from(original);
++				bytes[Math.floor(bytes.length * (0.4 + attempt / 100))] ^= 0x55;
++				if ((await codeOf(bytes, MIME[format], { decoder: inProcessDecoder })) === "OK")
++					accepted.push(format);
++			}
++		}
++		expect(accepted.length).toBeGreaterThan(0);
++	});
++
++	it("accepts a matching digest and treats it case-sensitively", async () => {
++		const { png } = await stills();
++		const digest = createHash("sha256").update(png).digest("hex");
++		const validator = createOutputValidator({ decoder: inProcessDecoder });
++		expect(
++			(await validator.validate(png, source("image/png"), { expectedSha256: digest })).ok,
++		).toBe(true);
++		expect(
++			await validator.validate(png, source("image/png"), { expectedSha256: digest.toUpperCase() }),
++		).toMatchObject({ code: "DIGEST_MISMATCH" });
++	});
++
++	it("never returns success for a mutated image unless it decodes to the source geometry", async () => {
++		const random = prng(7);
++		const corpus = Object.entries(await stills());
++		let accepted = 0;
++		for (let round = 0; round < 240; round++) {
++			const [format, original] = corpus[round % corpus.length]!;
++			const bytes = Buffer.from(original);
++			for (let flips = 0; flips < 1 + Math.floor(random() * 4); flips++)
++				bytes[Math.floor(random() * bytes.length)] ^= 1 << Math.floor(random() * 8);
++			const result = await createOutputValidator({ decoder: inProcessDecoder }).validate(
++				bytes,
++				source(MIME[format as keyof typeof MIME]),
++			);
++			if (result.ok) {
++				accepted++;
++				expect([result.width, result.height]).toEqual([64, 48]);
++				expect(result.format).toBe(format);
++			} else {
++				expect(result.code).not.toBe("DECODER_CRASHED");
++			}
++		}
++		expect(accepted).toBeLessThan(240); // some mutations must be caught
++	});
++});
++
++describe("wrong format", () => {
++	it("rejects output whose signature differs from the source MIME type, whatever it is called", async () => {
++		const { jpeg, png, webp } = await stills();
++		const decoder = forbiddenDecoder();
++		expect(await codeOf(jpeg, "image/png", { decoder })).toBe("WRONG_FORMAT");
++		expect(await codeOf(png, "image/jpeg", { decoder })).toBe("WRONG_FORMAT");
++		expect(await codeOf(webp, "image/png", { decoder })).toBe("WRONG_FORMAT");
++		expect(await codeOf(png, "image/webp", { decoder })).toBe("WRONG_FORMAT");
++		expect(decoder.calls).toBe(0);
++	});
++
++	it("rejects a decoder that reports a different format than the header", async () => {
++		const { png } = await stills();
++		const liar: FullImageDecoder = {
++			decode: async () => ({ format: "jpeg", width: 64, height: 48, frames: 1 }),
++		};
++		expect(await codeOf(png, "image/png", { decoder: liar })).toBe("WRONG_FORMAT");
++	});
++});
++
++describe("changed dimensions", () => {
++	it("rejects any change in width or height before decoding", async () => {
++		const decoder = forbiddenDecoder();
++		const wider = await solid(65, 48).png().toBuffer();
++		const taller = await solid(64, 49).png().toBuffer();
++		const swapped = await solid(48, 64).png().toBuffer();
++		const scaled = await solid(32, 24).png().toBuffer();
++		for (const bytes of [wider, taller, swapped, scaled])
++			expect(await codeOf(bytes, "image/png", { decoder })).toBe("DIMENSIONS_CHANGED");
++		expect(decoder.calls).toBe(0);
++	});
++
++	it("rejects when the decoder disagrees with the header on dimensions", async () => {
++		const { png } = await stills();
++		const mismatched: FullImageDecoder = {
++			decode: async () => ({ format: "png", width: 64, height: 47, frames: 1 }),
++		};
++		expect(await codeOf(png, "image/png", { decoder: mismatched })).toBe("DIMENSIONS_CHANGED");
++	});
++
++	it("refuses to compare against a source with unknown geometry", async () => {
++		const { png } = await stills();
++		const validator = createOutputValidator({ decoder: forbiddenDecoder() });
++		expect(await validator.validate(png, source("image/png", null, null))).toMatchObject({
++			ok: false,
++			code: "SOURCE_GEOMETRY_UNKNOWN",
++		});
++		expect(await validator.validate(png, source("image/png", 64, 0))).toMatchObject({
++			ok: false,
++			code: "SOURCE_GEOMETRY_UNKNOWN",
++		});
++	});
++});
++
++describe("oversized output", () => {
++	it("rejects output over the byte limit before reading it", async () => {
++		const { png } = await stills();
++		const decoder = forbiddenDecoder();
++		expect(
++			await codeOf(png, "image/png", { decoder, limits: { maxBytes: png.byteLength - 1 } }),
++		).toBe("TOO_LARGE_BYTES");
++		expect(
++			await codeOf(png, "image/png", {
++				decoder: inProcessDecoder,
++				limits: { maxBytes: png.byteLength },
++			}),
++		).toBe("OK");
++		expect(decoder.calls).toBe(0);
++	});
++
++	it("rejects a pixel bomb from its header, without spawning a decoder", async () => {
++		const bomb = await solid(12000, 12000).png({ compressionLevel: 9 }).toBuffer();
++		expect(bomb.byteLength).toBeLessThan(1_000_000); // a small file that declares 144 MP
++		const decoder = forbiddenDecoder();
++		expect(await codeOf(bomb, "image/png", { decoder, width: 12000, height: 12000 })).toBe(
++			"TOO_MANY_PIXELS",
++		);
++		expect(decoder.calls).toBe(0);
++	});
++
++	it("applies the pixel limit exactly at its boundary", async () => {
++		const { png } = await stills();
++		expect(
++			await codeOf(png, "image/png", {
++				decoder: inProcessDecoder,
++				limits: { maxPixels: 64 * 48, maxInFlightPixels: 64 * 48 },
++			}),
++		).toBe("OK");
++		expect(
++			await codeOf(png, "image/png", {
++				decoder: forbiddenDecoder(),
++				limits: { maxPixels: 64 * 48 - 1, maxInFlightPixels: 64 * 48 },
++			}),
++		).toBe("TOO_MANY_PIXELS");
++	});
++
++	it("passes the pixel limit to the decoder, which refuses a header that lies", async () => {
++		const { png } = await stills();
++		const seen: number[] = [];
++		const spy: FullImageDecoder = {
++			decode: async (_bytes, request) => {
++				seen.push(request.maxPixels);
++				throw new ImageDecodeError("TOO_MANY_PIXELS", "x");
++			},
++		};
++		expect(
++			await codeOf(png, "image/png", {
++				decoder: spy,
++				limits: { maxPixels: 10_000, maxInFlightPixels: 10_000 },
++			}),
++		).toBe("TOO_MANY_PIXELS");
++		expect(seen).toEqual([10_000]);
++	});
++});
++
++describe("unsupported images", () => {
++	it("rejects recognised formats outside the supported set without decoding", async () => {
++		const decoder = forbiddenDecoder();
++		const gif = await solid(64, 48).gif().toBuffer();
++		const tiff = await solid(64, 48).tiff().toBuffer();
++		const avif = await solid(64, 48).avif().toBuffer();
++		const svg = new TextEncoder().encode(
++			'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48"><script>alert(1)</script></svg>',
++		);
++		const bmp = Buffer.concat([Buffer.from("BM"), Buffer.alloc(60)]);
++		for (const bytes of [gif, tiff, avif, svg, bmp]) {
++			expect(await codeOf(bytes, "image/png", { decoder })).toBe("UNSUPPORTED_FORMAT");
++		}
++		expect(decoder.calls).toBe(0);
++	});
++
++	it("rejects an unsupported source type even when the output is a valid supported image", async () => {
++		const { png } = await stills();
++		expect(await codeOf(png, "image/gif", { decoder: forbiddenDecoder() })).toBe(
++			"UNSUPPORTED_FORMAT",
++		);
++		expect(await codeOf(png, "image/svg+xml", { decoder: forbiddenDecoder() })).toBe(
++			"UNSUPPORTED_FORMAT",
++		);
++		expect(await codeOf(png, "application/octet-stream", { decoder: forbiddenDecoder() })).toBe(
++			"UNSUPPORTED_FORMAT",
++		);
++	});
++
++	it("rejects animated WebP, APNG and animated GIF", async () => {
++		const decoder = forbiddenDecoder();
++		const webp = await animatedWebp();
++		expect((await sharp(webp).metadata()).pages).toBe(2);
++		expect(await codeOf(webp, "image/webp", { decoder })).toBe("ANIMATED");
++		const { png } = await stills();
++		expect(await codeOf(withAnimationControl(png), "image/png", { decoder })).toBe("ANIMATED");
++		expect(await codeOf(await animatedGif(), "image/gif", { decoder })).toBe("UNSUPPORTED_FORMAT");
++		expect(await codeOf(await animatedGif(), "image/png", { decoder })).toBe("UNSUPPORTED_FORMAT");
++		expect(decoder.calls).toBe(0);
++	});
++
++	it("rejects a WebP that only sets the VP8X animation flag", async () => {
++		const withAlpha = Buffer.from(
++			await sharp({ create: { width: 64, height: 48, channels: 4, background: "#3070c080" } })
++				.webp()
++				.toBuffer(),
++		);
++		expect(withAlpha.subarray(12, 16).toString()).toBe("VP8X");
++		expect(await codeOf(withAlpha, "image/webp", { decoder: inProcessDecoder })).toBe("OK");
++		withAlpha[20] |= 0x02;
++		expect(await codeOf(withAlpha, "image/webp", { decoder: forbiddenDecoder() })).toBe("ANIMATED");
++	});
++
++	it("rejects a decoder that finds several frames the header did not declare", async () => {
++		const { png } = await stills();
++		const multi: FullImageDecoder = {
++			decode: async () => ({ format: "png", width: 64, height: 48, frames: 3 }),
++		};
++		expect(await codeOf(png, "image/png", { decoder: multi })).toBe("ANIMATED");
++	});
++});
++
++describe("decoder limits and admission", () => {
++	it("terminates a decode that exceeds its wall time and leaves no process behind", async () => {
++		const bytes = await noisy(64, 48, "png");
++		let pid: number | undefined;
++		const decoder = createSharpChildDecoder({
++			onSpawn: (value) => {
++				pid = value;
++			},
++		});
++		const started = Date.now();
++		expect(await codeOf(bytes, "image/png", { decoder, limits: { wallTimeMs: 1 } })).toBe(
++			"DECODE_TIMEOUT",
++		);
++		expect(Date.now() - started).toBeLessThan(2000);
++		expect(pid).toBeTypeOf("number");
++		await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(/ESRCH/));
++	});
++
++	it("kills a decoder that hangs, not merely one that finishes late", async () => {
++		const directory = await mkdtemp(join(tmpdir(), "emdash-hang-"));
++		try {
++			const stub = join(directory, "sharp.mjs");
++			// A sharp stand-in whose metadata never resolves: only a kill can end this decode.
++			await writeFile(
++				stub,
++				"const hang = () => new Promise(() => setInterval(() => {}, 1000));\nexport default Object.assign(() => ({ metadata: hang, stats: hang }), { cache() {} });\n",
++			);
++			let pid: number | undefined;
++			const decoder = createSharpChildDecoder({
++				sharpPath: stub,
++				onSpawn: (value) => {
++					pid = value;
++				},
++			});
++			const { png } = await stills();
++			const started = Date.now();
++			expect(await codeOf(png, "image/png", { decoder, limits: { wallTimeMs: 300 } })).toBe(
++				"DECODE_TIMEOUT",
++			);
++			expect(Date.now() - started).toBeLessThan(3000);
++			await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(/ESRCH/), {
++				timeout: 2000,
++			});
++		} finally {
++			await rm(directory, { recursive: true, force: true });
++		}
++	});
++
++	it("reports an unavailable decoder instead of accepting unvalidated output", async () => {
++		const { png } = await stills();
++		const missing = createSharpChildDecoder({ sharpPath: "/nonexistent/sharp/index.js" });
++		expect(await codeOf(png, "image/png", { decoder: missing })).toBe("DECODER_CRASHED");
++		const unavailable: FullImageDecoder = {
++			decode: async () => {
++				throw new ImageDecodeError("DECODER_UNAVAILABLE", "none");
++			},
++		};
++		expect(await codeOf(png, "image/png", { decoder: unavailable })).toBe("DECODER_UNAVAILABLE");
++	});
++
++	it("reports a crashed decoder as such", async () => {
++		const { png } = await stills();
++		const crashing: FullImageDecoder = {
++			decode: async () => {
++				throw new ImageDecodeError("DECODER_CRASHED", "x");
++			},
++		};
++		expect(await codeOf(png, "image/png", { decoder: crashing })).toBe("DECODER_CRASHED");
++	});
++
++	it("refuses work beyond the in-flight pixel budget as retryable, and releases the budget afterwards", async () => {
++		const { png } = await stills();
++		const pixels = 64 * 48;
++		const admission = createDecodeAdmission(pixels);
++		const gate = Promise.withResolvers<void>();
++		const slow: FullImageDecoder = {
++			decode: async (bytes, request) => {
++				await gate.promise;
++				return inProcessDecoder.decode(bytes, request);
++			},
++		};
++		const validator = createOutputValidator({
++			decoder: slow,
++			admission,
++			limits: { maxPixels: pixels, maxInFlightPixels: pixels },
++		});
++		const first = validator.validate(png, source("image/png"));
++		await vi.waitFor(() => expect(admission.inFlightPixels()).toBe(pixels));
++		expect(await validator.validate(png, source("image/png"))).toMatchObject({
++			ok: false,
++			code: "BUSY",
++			retryable: true,
++		});
++		gate.resolve();
++		expect((await first).ok).toBe(true);
++		expect(admission.inFlightPixels()).toBe(0);
++		expect((await validator.validate(png, source("image/png"))).ok).toBe(true);
++	});
++
++	it("releases the budget when the decoder fails or throws unexpectedly", async () => {
++		const { png } = await stills();
++		const admission = createDecodeAdmission(64 * 48);
++		const failing: FullImageDecoder = {
++			decode: async () => {
++				throw new ImageDecodeError("CORRUPT", "x");
++			},
++		};
++		const exploding: FullImageDecoder = {
++			decode: async () => {
++				throw new TypeError("bug");
++			},
++		};
++		const limits = { maxPixels: 64 * 48, maxInFlightPixels: 64 * 48 };
++		expect(
++			await createOutputValidator({ decoder: failing, admission, limits }).validate(
++				png,
++				source("image/png"),
++			),
++		).toMatchObject({ code: "CORRUPT" });
++		await expect(
++			createOutputValidator({ decoder: exploding, admission, limits }).validate(
++				png,
++				source("image/png"),
++			),
++		).rejects.toThrow(TypeError);
++		expect(admission.inFlightPixels()).toBe(0);
++	});
++
++	it("rejects inconsistent limits", () => {
++		expect(() =>
++			createOutputValidator({
++				decoder: inProcessDecoder,
++				limits: { maxPixels: 100, maxInFlightPixels: 99 },
++			}),
++		).toThrow(RangeError);
++		expect(() =>
++			createOutputValidator({ decoder: inProcessDecoder, limits: { maxBytes: 0 } }),
++		).toThrow(RangeError);
++		expect(() =>
++			createOutputValidator({ decoder: inProcessDecoder, limits: { wallTimeMs: 1.5 } }),
++		).toThrow(RangeError);
++	});
++});
++
++describe("admission", () => {
++	it("admits only while the sum fits, and release is idempotent", () => {
++		const admission = createDecodeAdmission(100);
++		const a = admission.tryAcquire(60)!;
++		expect(admission.tryAcquire(41)).toBeNull();
++		const b = admission.tryAcquire(40)!;
++		expect(admission.inFlightPixels()).toBe(100);
++		a();
++		a();
++		expect(admission.inFlightPixels()).toBe(40);
++		b();
++		expect(admission.inFlightPixels()).toBe(0);
++		expect(admission.tryAcquire(0)).toBeNull();
++		expect(admission.tryAcquire(-5)).toBeNull();
++		expect(admission.tryAcquire(Number.NaN)).toBeNull();
++	});
++});
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 61f97a2c9442af5a0c84e329a67ef4b9fca74698..ab972d831a519512a1430c3cdcd083e45beb9794 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -2323,6 +2323,9 @@ importers:
+       publint:
+         specifier: 'catalog:'
+         version: 0.3.17
++      sharp:
++        specifier: 0.35.4
++        version: 0.35.4(@types/node@26.1.1)
+       tsdown:
+         specifier: 'catalog:'
+         version: 0.20.3(@arethetypeswrong/core@0.18.2)(@typescript/native-preview@7.0.0-dev.20260421.2)(oxc-resolver@11.16.4(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3))(publint@0.3.17)(typescript@6.0.3)
+@@ -16893,7 +16896,7 @@ snapshots:
+   '@napi-rs/wasm-runtime@1.1.1':
+     dependencies:
+       '@emnapi/core': 1.7.1
+-      '@emnapi/runtime': 1.8.1
++      '@emnapi/runtime': 1.11.3
+       '@tybys/wasm-util': 0.10.1
+     optional: true
+ 
+@@ -23218,7 +23221,6 @@ snapshots:
+       '@img/sharp-win32-ia32': 0.35.4
+       '@img/sharp-win32-x64': 0.35.4
+       '@types/node': 26.1.1
+-    optional: true
+ 
+   shebang-command@2.0.0:
+     dependencies:

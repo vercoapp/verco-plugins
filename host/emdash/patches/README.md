@@ -7,12 +7,15 @@ tree, changed files, related tests, scope and limits.
 | Patch | Content |
 | --- | --- |
 | [`0001-media-revisions-private-originals.patch`](0001-media-revisions-private-originals.patch) | Migration 092, revision/original/operation records, digest-verified private originals, local private storage, public-route guard. |
+| [`0002-bounded-output-validation.patch`](0002-bounded-output-validation.patch) | Output validator: header checks, animation and format refusal, digest declaration, admission budget and a killable Sharp child-process full decode. Adds Sharp as an optional peer. |
+
+Patches are cumulative and apply in order; each records the git tree it produces.
 
 Create the patched worktree with `pnpm host:pilot` and verify that the patches
 apply to a pristine tree with `pnpm host:pilot-check`. Export changes with
 `pnpm host:patch-export <NNNN-name.patch> <task>...`; run a patch's tests with
-`pnpm host:qualify-patch <name>`, which refuses a worktree that differs from the
-exported patch.
+`pnpm host:qualify-patch`, which refuses a worktree that differs from the
+last exported patch and runs every patch's tests.
 
 The patches are a pilot. They do not yet cover every consumer of media bytes, the plugin-facing
 bridges, restore, or installation and rollback instructions, and they are not a supported version
