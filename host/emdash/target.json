@@ -9,5 +9,6 @@
     "@emdash-cms/sandbox-workerd": "0.9.2",
     "@emdash-cms/plugin-types": "0.5.0"
   },
-  "qualifiedProfiles": []
+  "qualifiedProfiles": [],
+  "patchManifest": "host/emdash/patches/patches.json"
 }

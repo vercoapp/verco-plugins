@@ -14,6 +14,11 @@
     "host:qualify-delivery": "node scripts/qualify-media-delivery.mjs",
     "host:qualify-writers": "node scripts/qualify-media-writers.mjs",
     "host:qualify-recovery": "node scripts/qualify-media-recovery.mjs",
+    "host:measure-decoder": "node scripts/measure-decoder-budget.mjs",
+    "host:pilot": "node scripts/host-pilot.mjs",
+    "host:pilot-check": "node scripts/host-pilot.mjs --check",
+    "host:patch-export": "node scripts/export-host-patch.mjs",
+    "host:qualify-patch": "node scripts/qualify-host-patch.mjs"
     "host:measure-decoder": "node scripts/measure-decoder-budget.mjs"
   },
   "devDependencies": {

@@ -29,6 +29,14 @@ keeping the original, and never overwriting an editor's concurrent change. EmDas
 route does none of that, so this repository qualifies the needed host support before the plugin
 applies anything.
 
+### Host patches
+
+`host/emdash/patches/` holds patches against the pinned EmDash commit that add opt-in,
+revision-fenced media replacement with private originals. `pnpm host:pilot` builds a patched
+worktree and `pnpm host:qualify-patch` runs their tests. The patches are a pilot, not a supported
+version range, and nothing in EmDash calls them unless a site sets `safeMedia`. See
+`host/emdash/patches/README.md`.
+
 ## Working in the repository
 
 Node 22.16 or later and pnpm 10.18.3 (or `npm exec --yes --package pnpm@10.18.3 -- pnpm <command>`).
@@ -44,6 +52,10 @@ pnpm host:qualify-delivery   # Build and run a disposable Astro fixture that che
 pnpm host:qualify-writers    # Run the pinned EmDash editor handlers against a prototype revision fence on real SQLite connections.
 pnpm host:qualify-recovery   # Run the journaled publication prototype through a simulated crash at every step.
 pnpm host:measure-decoder    # Measure decode time and memory for still JPEG, PNG and WebP output and propose limits.
+pnpm host:pilot              # Create `.upstream/emdash-pilot`: the pinned EmDash commit with the patches in `host/emdash/patches/` applied.
+pnpm host:pilot-check        # Check that the patches apply to a pristine tree and produce the recorded git trees.
+pnpm host:patch-export       # Export the pilot worktree's changes as the next patch.
+pnpm host:qualify-patch      # Run the patches' tests in the pilot worktree.
 ```
 
 ### Adding a plugin
