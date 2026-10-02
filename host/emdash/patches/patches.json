@@ -53,6 +53,29 @@
         "A\tpackages/core/tests/unit/media/safe/output-validation.test.ts",
         "M\tpnpm-lock.yaml"
       ]
+    },
+    {
+      "name": "0003-staged-replacement-receipts.patch",
+      "tasks": [
+        "2.3"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/api/media-file-private-keys.test.ts"
+      ],
+      "scope": "Staged replacement service: validation, immutable candidate objects in the active storage, verified private original retention, a single-transaction publication of pointer, byte-derived metadata and receipt, idempotent resume, and the public file route resolving a stable key to the active revision. Exercised with a file-backed SQLite database, real local storage, the real route handler and simulated process death after every step.",
+      "limits": "Node/SQLite only; D1 is refused, not supported. No editor, native or bridge writer advances revisions, and the image endpoint, export, native and asset reads still resolve the stable key directly, so mutation must stay disabled. Orphan cleanup, restore and the authorized bridges are later tasks.",
+      "sha256": "db376cfc2a3e65d4b0d9fec96677640e4599c0d5d408de503b666531e4d8b63d",
+      "resultingTree": "658d68d724de7d8deb82d0a42e36b564f7eda7c5",
+      "files": [
+        "M\tpackages/core/src/astro/routes/api/media/file/[...key].ts",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "A\tpackages/core/src/media/safe/error-text.ts",
+        "A\tpackages/core/src/media/safe/replacement-service.ts",
+        "A\tpackages/core/src/media/safe/resolve-object.ts",
+        "A\tpackages/core/src/media/safe/revision-keys.ts",
+        "M\tpackages/core/src/transfer/staging/keys.ts",
+        "A\tpackages/core/tests/unit/media/safe/replacement-service.test.ts"
+      ]
     }
   ]
 }
