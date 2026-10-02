@@ -3,8 +3,8 @@
 A sandboxed EmDash plugin that reports images in the media library that are probably larger than they
 need to be. It is **read-only**: it never changes, replaces or deletes media.
 
-Status: in development, not published. The scanner core exists; the scan job and the admin report page
-do not yet.
+Status: in development, not published. The scanner and the scan job exist; the admin report page and
+the settings form do not yet.
 
 ## What it checks
 
@@ -26,11 +26,30 @@ finding is reported only when the estimated saving reaches both the byte and the
 GIF, SVG, HEIC and other image types are skipped, as are items with missing or invalid size or
 dimensions.
 
+## How a scan runs
+
+`POST /_emdash/api/plugins/image-optimizer/scan-start` starts a scan, unless one is already running,
+and processes the first 500 images straight away. Larger libraries continue from a task that runs
+every minute and handles another 500 each time; it is cancelled when the scan finishes.
+`GET .../scan-status` returns the progress and totals. Both routes require the `plugins:manage`
+permission.
+
+The scan reads the library newest first and stores one result per image. Images uploaded after a
+scan starts are scanned on upload instead and added to the totals. When the sweep finishes, results
+for media deleted since the previous scan are removed. Results for media deleted after that remain
+until the next scan.
+
+Thresholds come from the plugin settings `maxDimension`, `minSavingsBytes` and `minSavingsRatio`. A
+scan keeps the values it started with.
+
 ## Limits
 
 - The typical densities behind `heavy-encoding` are heuristics for photographic content, not
   measurements of an encoder. Graphics, screenshots and already-optimized files can be misjudged.
 - Measuring real savings needs the image bytes and an encoder, which a sandboxed plugin does not have.
+- An upload made at the moment a scan starts can be counted twice in the totals. The stored results
+  are not affected.
+- Tested in the EmDash plugin test hosts only, not yet on a deployed Node or Cloudflare site.
 
 ## Development
 
