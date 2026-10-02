@@ -35,7 +35,13 @@
     "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs"
   },
   "peerDependencies": {
-    "emdash": ">=1.1.0"
+    "emdash": ">=1.1.0",
+    "sharp": "^0.35.4"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@emdash-cms/blocks": "1.1.0",
