@@ -6,126 +6,10 @@ import {
   emptySummary,
   readScan,
   recordUpload,
-  SCAN_STATE_KEY,
-  startScan,
-  type ScanDeps,
-  type ScanRun,
-  type StoredResult,
+    startScan,
 } from '../src/job.ts';
 import { DEFAULT_SCAN_OPTIONS } from '../src/scanner.ts';
-
-interface FakeMedia {
-  id: string;
-  filename: string;
-  mimeType: string;
-  size: number | null;
-  width?: number | null;
-  height?: number | null;
-}
-
-/** In-memory stand-ins with the host's semantics: revisioned KV, newest-first keyset listing, range queries. */
-function fakeHost(library: FakeMedia[]) {
-  const kv = new Map<string, { value: unknown; revision: number }>();
-  const results = new Map<string, StoredResult>();
-  const listCalls: Array<string | undefined> = [];
-  let revisions = 0;
-  let clock = Date.parse('2026-10-01T00:00:00.000Z');
-  let beforeList: (() => Promise<void>) | undefined;
-  let beforeCas: (() => Promise<void>) | undefined;
-
-  const deps: ScanDeps = {
-    kv: {
-      async get<T>(key: string) {
-        return (kv.get(key)?.value as T | undefined) ?? null;
-      },
-      async getVersioned<T>(key: string) {
-        const entry = kv.get(key);
-        return entry ? { value: structuredClone(entry.value) as T, revision: String(entry.revision) } : null;
-      },
-      async compareAndSet(key: string, expected: string | null, value: unknown) {
-        const hook = beforeCas;
-        beforeCas = undefined;
-        await hook?.();
-        const entry = kv.get(key);
-        if ((entry ? String(entry.revision) : null) !== expected) return { applied: false } as const;
-        revisions += 1;
-        kv.set(key, { value: structuredClone(value), revision: revisions });
-        return { applied: true, revision: String(revisions) } as const;
-      },
-    } as unknown as ScanDeps['kv'],
-    media: {
-      async list(options) {
-        listCalls.push(options?.cursor);
-        const hook = beforeList;
-        beforeList = undefined;
-        await hook?.();
-        const prefix = options?.mimeType ?? '';
-        const matching = library.filter((item) => item.mimeType.startsWith(prefix));
-        // Keyset cursor, like the host: the next page starts after the last listed item, so items
-        // added at the front (newer uploads) are never reached.
-        const start = options?.cursor ? matching.findIndex((item) => item.id === options.cursor) + 1 : 0;
-        const limit = options?.limit ?? 50;
-        const items = matching.slice(start, start + limit);
-        const hasMore = start + limit < matching.length;
-        return {
-          items: items.map((item) => ({ ...item, url: '', createdAt: '' })),
-          hasMore,
-          ...(hasMore ? { cursor: items.at(-1)!.id } : {}),
-        };
-      },
-      async get(id) {
-        const item = library.find((candidate) => candidate.id === id);
-        return item ? { ...item, url: '', createdAt: '' } : null;
-      },
-    },
-    results: {
-      async put(id: string, data: StoredResult) {
-        results.set(id, structuredClone(data));
-      },
-      async putMany(items: Array<{ id: string; data: StoredResult }>) {
-        for (const { id, data } of items) results.set(id, structuredClone(data));
-      },
-      async query(options: { where: { runId: { lt: string } }; limit: number }) {
-        const matching = [...results].filter(([, data]) => data.runId < options.where.runId.lt);
-        return {
-          items: matching.slice(0, options.limit).map(([id, data]) => ({ id, data })),
-          hasMore: matching.length > options.limit,
-        };
-      },
-      async deleteMany(ids: string[]) {
-        for (const id of ids) results.delete(id);
-        return ids.length;
-      },
-    } as unknown as ScanDeps['results'],
-    log: { debug() {}, info() {}, warn() {}, error() {} } as unknown as ScanDeps['log'],
-    now: () => new Date((clock += 1000)),
-  };
-
-  return {
-    deps,
-    results,
-    listCalls,
-    state: () => kv.get(SCAN_STATE_KEY)?.value as ScanRun | undefined,
-    onNextList(hook: () => Promise<void>) {
-      beforeList = hook;
-    },
-    onNextCompareAndSet(hook: () => Promise<void>) {
-      beforeCas = hook;
-    },
-  };
-}
-
-function jpegs(count: number, overrides: Partial<FakeMedia> = {}): FakeMedia[] {
-  return Array.from({ length: count }, (_, index) => ({
-    id: `m${String(index).padStart(4, '0')}`,
-    filename: `photo-${index}.jpg`,
-    mimeType: 'image/jpeg',
-    size: 600_000,
-    width: 1200,
-    height: 800,
-    ...overrides,
-  }));
-}
+import { fakeHost, jpegs, type FakeMedia } from './fake-host.ts';
 
 describe('sweep', () => {
   it('pages through the library, then completes with totals for every image', async () => {
@@ -133,9 +17,9 @@ describe('sweep', () => {
     const host = fakeHost(library);
     await startScan(host.deps, DEFAULT_SCAN_OPTIONS);
 
-    // One page per call: three sweep pages, then the cleanup page that completes the run.
-    for (const phase of ['sweep', 'sweep', 'cleanup', 'complete']) {
-      expect((await advanceScan(host.deps, 1))?.phase).toBe(phase);
+    // One page per call. The third finishes the sweep, and the same tick's cleanup completes the run.
+    for (const phase of ['sweep', 'sweep', 'complete']) {
+      expect((await advanceScan(host.deps, { sweepPages: 1 }))?.phase).toBe(phase);
     }
     expect(host.listCalls).toEqual([undefined, 'm0099', 'm0199']);
 
@@ -163,13 +47,14 @@ describe('sweep', () => {
 
     // While this invocation lists its first page, another one takes the same page and commits.
     host.onNextList(async () => {
-      await advanceScan(host.deps, 1);
+      await advanceScan(host.deps, { sweepPages: 1 });
     });
-    const afterConflict = await advanceScan(host.deps, 5);
-    expect(afterConflict?.totals.scanned).toBe(100);
-    expect(afterConflict?.cursor).toBe('m0099');
+    const afterConflict = await advanceScan(host.deps);
+    // The losing tick reports the state it read, which is not complete, so the task keeps running.
+    expect(afterConflict).toMatchObject({ phase: 'sweep', totals: { scanned: 0 } });
+    expect(host.state()).toMatchObject({ cursor: 'm0099', totals: { scanned: 100 } });
 
-    await advanceScan(host.deps, 5);
+    await advanceScan(host.deps);
     expect(host.state()).toMatchObject({ phase: 'complete', totals: { scanned: 150, flagged: 150 } });
   });
 
@@ -201,7 +86,7 @@ describe('starting', () => {
     const host = fakeHost(jpegs(150));
     const first = await startScan(host.deps, DEFAULT_SCAN_OPTIONS);
     expect(first.started).toBe(true);
-    await advanceScan(host.deps, 1);
+    await advanceScan(host.deps, { sweepPages: 1 });
 
     const again = await startScan(host.deps, { ...DEFAULT_SCAN_OPTIONS, maxDimension: 100 });
     expect(again).toMatchObject({ started: false, run: { runId: first.run.runId, cursor: 'm0099' } });
@@ -249,17 +134,17 @@ describe('uploads', () => {
     const library = jpegs(150);
     const host = fakeHost(library);
     await startScan(host.deps, DEFAULT_SCAN_OPTIONS);
-    await advanceScan(host.deps, 1);
+    await advanceScan(host.deps, { sweepPages: 1 });
     library.unshift({ id: 'new', filename: 'new.jpg', mimeType: 'image/jpeg', size: 600_000, width: 1200, height: 800 });
 
     // The upload's first write conflicts with the next sweep page.
     host.onNextCompareAndSet(async () => {
-      await advanceScan(host.deps, 1);
+      await advanceScan(host.deps, { sweepPages: 1 });
     });
     await recordUpload(host.deps, 'new', DEFAULT_SCAN_OPTIONS);
 
     const before = host.state()!.updatedAt;
-    expect(host.state()).toMatchObject({ phase: 'cleanup', totals: { scanned: 151, flagged: 151 } });
+    expect(host.state()).toMatchObject({ phase: 'complete', totals: { scanned: 151, flagged: 151 } });
     await recordUpload(host.deps, 'new', DEFAULT_SCAN_OPTIONS);
     expect(host.state()!.updatedAt > before).toBe(true);
   });

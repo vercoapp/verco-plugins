@@ -40,9 +40,10 @@ are in English; numbers follow the administrator's locale.
 
 ## How a scan runs
 
-`POST /_emdash/api/plugins/image-optimizer/scan-start` starts a scan, unless one is already running,
-and processes the first 500 images straight away. Larger libraries continue from a task that runs
-every minute and handles another 500 each time; it is cancelled when the scan finishes.
+`POST /_emdash/api/plugins/image-optimizer/scan-start`, or the button on the report page, starts a
+scan unless one is already running. The work happens in a task that runs every minute and handles up
+to 300 images each time, so results appear within about a minute and a library of 10,000 images takes
+about half an hour. The task is cancelled when the scan finishes.
 `GET .../scan-status` returns the progress and totals. Both routes require the `plugins:manage`
 permission.
 
@@ -75,6 +76,11 @@ To repeat or extend this, `pnpm calibrate:fetch-kodak` downloads the suite into 
 `.calibration/` directory and `pnpm calibrate [directory]` measures any directory of lossless
 photographs.
 
+Each plugin invocation makes at most 10 calls to EmDash: on Cloudflare every storage, KV, settings,
+media, cron and log call counts toward the sandbox's subrequest limit, which is 10 by default. That
+limit, not processing time, is why a tick handles 300 images. The tests check the count for every
+hook and route, because neither the Node runner nor the test hosts enforce it.
+
 ## Limits
 
 - The densities are percentiles over one small corpus, not a model of image content. A detailed
@@ -88,7 +94,8 @@ photographs.
 - The report has no link to each image in the media library: Block Kit links can target content,
   plugin pages and settings, but not media items.
 - Tested in the EmDash plugin test hosts only, not yet on a deployed Node or Cloudflare site, and the
-  report has not been tried with users.
+  report has not been tried with users. The 50 ms CPU limit per invocation on Cloudflare has not been
+  measured.
 
 ## Development
 

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createPluginRuntimeTestHost, type PluginRuntimeTestHost } from '@emdash-cms/plugin-test';
 
 import { formatBytes, resolveLocale } from '../src/admin.ts';
+import { scanFromReport } from './runtime-helpers.ts';
 
 let host: PluginRuntimeTestHost | undefined;
 
@@ -61,9 +62,13 @@ describe('report page', () => {
     });
     await host.fixtures.media({ filename: 'anim.gif', mimeType: 'image/gif', bytes: BYTES });
 
-    const page = await host.admin.act('/report', 'start_scan');
+    const { started, page } = await scanFromReport(host);
 
-    expect(page.toast).toEqual({ type: 'success', message: 'Scan finished.' });
+    expect(started.toast).toEqual({
+      type: 'success',
+      message: 'Scan started. It runs in the background, about 300 images a minute.',
+    });
+    expect(find(started.blocks, 'banner')?.title).toBe('Scan in progress');
     expect(find(page.blocks, 'banner')).toBeUndefined();
     expect(find(page.blocks, 'stats')?.items).toEqual([
       { label: 'Images scanned', value: '4' },
@@ -101,7 +106,7 @@ describe('report page', () => {
   it('pages through flagged images with the table cursor', async () => {
     host = await createPluginRuntimeTestHost();
     await heavyJpegs(host, 51);
-    const first = await host.admin.act('/report', 'start_scan');
+    const { page: first } = await scanFromReport(host);
     const firstTable = find(first.blocks, 'table', 'results')!;
     expect(firstTable.rows).toHaveLength(50);
     expect(firstTable.rows[0]).toMatchObject({ file: 'photo-50.jpg' });
@@ -123,7 +128,7 @@ describe('report page', () => {
   it('falls back to the first page for a cursor the host rejects', async () => {
     host = await createPluginRuntimeTestHost();
     await heavyJpegs(host, 1);
-    await host.admin.act('/report', 'start_scan');
+    await scanFromReport(host);
 
     const page = await host.admin.act('/report', 'results_page', { value: { cursor: 'not-a-cursor' } });
     expect(find(page.blocks, 'table', 'results')?.rows).toHaveLength(1);
@@ -132,15 +137,16 @@ describe('report page', () => {
 
   it('shows progress and the last confirmed update while a scan runs', async () => {
     host = await createPluginRuntimeTestHost();
-    for (let index = 0; index < 501; index += 1) {
+    for (let index = 0; index < 301; index += 1) {
       await host.fixtures.media({ filename: `${index}.gif`, mimeType: 'image/gif', bytes: BYTES });
     }
-    const page = await host.admin.act('/report', 'start_scan');
+    await host.admin.act('/report', 'start_scan');
+    await host.transport.invokeHook('cron', { name: 'scan-step', scheduledAt: new Date().toISOString() });
+    const page = await host.admin.loadPage('/report');
 
-    expect(page.toast).toEqual({ type: 'success', message: 'Scan started. It continues in the background.' });
     expect(find(page.blocks, 'banner')).toMatchObject({
       title: 'Scan in progress',
-      description: expect.stringMatching(/^500 images scanned so far\. Last confirmed update .+ UTC\./),
+      description: expect.stringMatching(/^300 images scanned so far\. Last confirmed update .+ UTC\./),
     });
     const actions = find(page.blocks, 'actions')!;
     expect(actions.elements.map((element) => element.label)).toEqual(['Refresh', 'Settings']);
@@ -166,14 +172,15 @@ describe('report page', () => {
     await heavyJpegs(host, 1);
     // The heavy JPEG saves 369.6 kB, 61.6% of its size.
     await host.fixtures.plugin.setting('minSavingsPercent', 62);
-    expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '0' });
+    const flagged = async () => find((await scanFromReport(host!)).page.blocks, 'stats')?.items[1]?.value;
+    expect(await flagged()).toBe('0');
 
     await host.fixtures.plugin.setting('minSavingsPercent', 61);
     await host.fixtures.plugin.setting('minSavingsKB', 370);
-    expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '0' });
+    expect(await flagged()).toBe('0');
 
     await host.fixtures.plugin.setting('minSavingsKB', 369);
-    expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '1' });
+    expect(await flagged()).toBe('1');
   });
 
   it('formats numbers for the admin locale', async () => {
@@ -187,7 +194,7 @@ describe('report page', () => {
       width: 1200,
       height: 800,
     });
-    const german = await host.admin.act('/report', 'start_scan', { locale: 'de' });
+    const { page: german } = await scanFromReport(host, { locale: 'de' });
     expect(find(german.blocks, 'stats')?.items[2]?.value).toBe('1,3 MB');
     expect(find(german.blocks, 'table', 'results')?.rows[0]).toMatchObject({ size: '1,5 MB', dimensions: '1200 × 800' });
 
@@ -215,7 +222,7 @@ describe('savings widget', () => {
     ]);
 
     await heavyJpegs(host, 1);
-    await host.admin.act('/report', 'start_scan');
+    await scanFromReport(host);
     const widget = await host.admin.loadWidget('savings');
     expect(widget.blocks).toEqual([
       {

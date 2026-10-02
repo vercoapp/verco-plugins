@@ -40,11 +40,12 @@ function results(ctx: PluginContext): ScanDeps['results'] {
 
 /**
  * Reads scan options from plugin settings, which use kilobytes and percent; unset settings take the
- * defaults. Throws `RangeError` for values the scan cannot use.
+ * defaults. Throws `RangeError` for values the scan cannot use. One bridge call.
  */
 async function readOptions(ctx: PluginContext): Promise<ScanOptions> {
-  const [maxDimension, minSavingsKB, minSavingsPercent] = await Promise.all(
-    ['maxDimension', 'minSavingsKB', 'minSavingsPercent'].map((key) => ctx.settings.get(key)),
+  const settings = new Map((await ctx.settings.list()).map(({ key, value }) => [key, value]));
+  const [maxDimension, minSavingsKB, minSavingsPercent] = ['maxDimension', 'minSavingsKB', 'minSavingsPercent'].map(
+    (key) => settings.get(key),
   );
   const options: Partial<ScanOptions> = {};
   if (maxDimension !== null && maxDimension !== undefined) options.maxDimension = maxDimension as number;
@@ -56,10 +57,13 @@ async function readOptions(ctx: PluginContext): Promise<ScanOptions> {
 }
 
 type BeginOutcome =
-  | { ok: true; started: boolean; run: ScanRun | null }
+  | { ok: true; started: boolean; run: ScanRun }
   | { ok: false; error: 'INVALID_SETTINGS' | 'CRON_UNAVAILABLE'; message?: string };
 
-/** Starts a scan, or reports the one already running, and takes its first pages. */
+/**
+ * Starts a scan, or reports the one already running, and leaves the work to the scheduled task.
+ * Four bridge calls: settings, reading and writing the state, and scheduling the task.
+ */
 async function beginScan(ctx: PluginContext): Promise<BeginOutcome> {
   let options: ScanOptions;
   try {
@@ -70,11 +74,8 @@ async function beginScan(ctx: PluginContext): Promise<BeginOutcome> {
   }
   if (!ctx.cron) return { ok: false, error: 'CRON_UNAVAILABLE' };
 
-  const { started } = await startScan(deps(ctx), options);
+  const { started, run } = await startScan(deps(ctx), options);
   await ctx.cron.schedule(SCAN_TASK, { schedule: SCAN_TASK_SCHEDULE });
-  // Take the first pages now so a small library finishes without waiting for the task.
-  const run = await advanceScan(deps(ctx));
-  if (run?.phase === 'complete') await ctx.cron.cancel(SCAN_TASK);
   return { ok: true, started, run };
 }
 
@@ -85,12 +86,16 @@ function beginToast(outcome: BeginOutcome): NonNullable<BlockResponse['toast']> 
       : { type: 'error', message: 'The scan did not start: this site cannot run scheduled tasks.' };
   }
   if (!outcome.started) return { type: 'info', message: 'A scan is already running.' };
-  return outcome.run?.phase === 'complete'
-    ? { type: 'success', message: 'Scan finished.' }
-    : { type: 'success', message: 'Scan started. It continues in the background.' };
+  return { type: 'success', message: 'Scan started. It runs in the background, about 300 images a minute.' };
 }
 
-async function loadReport(ctx: PluginContext, cursor: string | null, locale: string): Promise<ReportView> {
+/** Three bridge calls, or four when the caller does not already have the run. */
+async function loadReport(
+  ctx: PluginContext,
+  cursor: string | null,
+  locale: string,
+  known?: ScanRun,
+): Promise<ReportView> {
   const collection = results(ctx);
   const flagged = (next: string | null) =>
     collection.query({
@@ -113,7 +118,7 @@ async function loadReport(ctx: PluginContext, cursor: string | null, locale: str
   const [skipped, skippedTotal, run] = await Promise.all([
     collection.query({ where: { status: 'skipped' }, limit: SKIPPED_SHOWN }),
     collection.count({ status: 'skipped' }),
-    readScan(ctx),
+    known ?? readScan(ctx),
   ]);
 
   const asResults = (items: Array<{ id: string; data: unknown }>) =>
@@ -129,6 +134,7 @@ async function loadReport(ctx: PluginContext, cursor: string | null, locale: str
 
 const plugin: SandboxedPlugin = {
   hooks: {
+    // At most TICK_CALL_BUDGET bridge calls to advance, plus one to cancel.
     cron: async (event, ctx) => {
       if (event.name !== SCAN_TASK) return;
       const run = await advanceScan(deps(ctx));
@@ -151,8 +157,9 @@ const plugin: SandboxedPlugin = {
           return savingsWidget(await readScan(ctx), locale);
         }
         if (request?.kind === 'action' && request.actionId === ACTION_START) {
-          const toast = beginToast(await beginScan(ctx));
-          return reportPage(await loadReport(ctx, null, locale), toast);
+          const outcome = await beginScan(ctx);
+          const view = await loadReport(ctx, null, locale, outcome.ok ? outcome.run : undefined);
+          return reportPage(view, beginToast(outcome));
         }
         const cursor = request?.kind === 'action' && request.actionId === ACTION_RESULTS_PAGE ? request.cursor : null;
         return reportPage(await loadReport(ctx, cursor, locale));

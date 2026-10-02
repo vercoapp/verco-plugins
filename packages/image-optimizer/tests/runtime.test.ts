@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createPluginRuntimeTestHost, type PluginRuntimeTestHost } from '@emdash-cms/plugin-test';
 
 import type { ScanRun, StoredResult } from '../src/job.ts';
+import { finishScan, tick } from './runtime-helpers.ts';
 
 let host: PluginRuntimeTestHost | undefined;
 
@@ -36,13 +37,19 @@ async function library(runtime: PluginRuntimeTestHost) {
 }
 
 describe('scan through the sandbox runtime', () => {
-  it('scans the library from the start route and stops the scheduled task', async () => {
+  it('starts from the route, scans in the scheduled task, and stops the task', async () => {
     host = await createPluginRuntimeTestHost();
     const ids = await library(host);
 
     const response = (await host.transport.invokeRoute('scan-start')) as { ok: boolean; run: ScanRun };
-    expect(response).toMatchObject({ ok: true, started: true, run: { phase: 'complete' } });
-    expect(response.run.totals).toMatchObject({
+    expect(response).toMatchObject({ ok: true, started: true, run: { phase: 'sweep', totals: { scanned: 0 } } });
+    expect(await host.inspect.scheduledTasks()).toEqual([
+      expect.objectContaining({ name: 'scan-step', schedule: '* * * * *' }),
+    ]);
+
+    const run = await tick(host);
+    expect(run?.phase).toBe('complete');
+    expect(run?.totals).toMatchObject({
       scanned: 3,
       flagged: 1,
       ok: 1,
@@ -61,27 +68,23 @@ describe('scan through the sandbox runtime', () => {
     expect(await host.inspect.scheduledTasks()).toEqual([]);
 
     const status = await host.transport.invokeRoute('scan-status');
-    expect(status).toEqual({ ok: true, run: response.run });
+    expect(status).toEqual({ ok: true, run });
   });
 
-  it('leaves a large library to the scheduled task, which finishes it and stops', async () => {
+  it('takes a large library over several ticks and stops the task at the end', async () => {
     host = await createPluginRuntimeTestHost();
-    // One more image than the start route takes in its first pass of five 100-item pages.
-    for (let index = 0; index < 501; index += 1) {
+    // One more image than a tick's three 100-item pages.
+    for (let index = 0; index < 301; index += 1) {
       await host.fixtures.media({ filename: `${index}.gif`, mimeType: 'image/gif', bytes: BYTES });
     }
+    await host.transport.invokeRoute('scan-start');
 
-    const response = (await host.transport.invokeRoute('scan-start')) as { run: ScanRun };
-    expect(response.run).toMatchObject({ phase: 'sweep', totals: { scanned: 500 } });
-    expect(await host.inspect.scheduledTasks()).toEqual([
-      expect.objectContaining({ name: 'scan-step', schedule: '* * * * *' }),
-    ]);
+    expect(await tick(host)).toMatchObject({ phase: 'sweep', totals: { scanned: 300 } });
+    expect(await host.inspect.scheduledTasks()).toHaveLength(1);
 
-    await host.transport.invokeHook('cron', { name: 'scan-step', scheduledAt: new Date().toISOString() });
-
-    expect(await host.inspect.kv.get<ScanRun>('state:scan')).toMatchObject({
+    expect(await tick(host)).toMatchObject({
       phase: 'complete',
-      totals: { scanned: 501, skipped: { 'unsupported-format': 501 } },
+      totals: { scanned: 301, skipped: { 'unsupported-format': 301 } },
     });
     expect(await host.inspect.scheduledTasks()).toEqual([]);
   });
@@ -89,6 +92,7 @@ describe('scan through the sandbox runtime', () => {
   it('scans an upload from the upload hook', async () => {
     host = await createPluginRuntimeTestHost();
     await host.transport.invokeRoute('scan-start');
+    await finishScan(host);
     const { id } = await host.fixtures.media({
       filename: 'new.png',
       mimeType: 'image/png',
