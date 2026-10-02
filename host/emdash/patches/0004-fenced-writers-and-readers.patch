@@ -1,0 +1,1278 @@
+diff --git a/packages/core/src/astro/integration/index.ts b/packages/core/src/astro/integration/index.ts
+index c08cd2e00fa38c49b8568e87434ece1b237096a5..46120d2275f01f4d26bcccf51ddfddff14afc6ed 100644
+--- a/packages/core/src/astro/integration/index.ts
++++ b/packages/core/src/astro/integration/index.ts
+@@ -178,6 +178,7 @@ export function buildSerializableConfig(resolvedConfig: EmDashConfig): Record<st
+ 		siteUrl: resolvedConfig.siteUrl,
+ 		trustedProxyHeaders: resolvedConfig.trustedProxyHeaders,
+ 		maxUploadSize: resolvedConfig.maxUploadSize,
++		safeMedia: resolvedConfig.safeMedia,
+ 		admin: resolvedConfig.admin,
+ 		toolbar: resolvedConfig.toolbar,
+ 		updateCheck: resolvedConfig.updateCheck,
+diff --git a/packages/core/src/astro/integration/runtime.ts b/packages/core/src/astro/integration/runtime.ts
+index fa7baed32a820ad54615f3f69a720833c7ec7132..45032a8cdc07f636e18f121940c9e8c90dedb3c6 100644
+--- a/packages/core/src/astro/integration/runtime.ts
++++ b/packages/core/src/astro/integration/runtime.ts
+@@ -435,6 +435,15 @@ export interface EmDashConfig {
+ 	 */
+ 	maxUploadSize?: number;
+ 
++	/**
++	 * Revision-fenced media replacement with private originals. Requires the local
++	 * filesystem storage adapter. When set, replacing media keeps its ID and URL,
++	 * retains the exact previous bytes in `privateDirectory` (never served and never
++	 * inside the public directories), and every reader serves the active revision.
++	 * Unset (default) keeps the existing behavior.
++	 */
++	safeMedia?: { privateDirectory: string };
++
+ 	/**
+ 	 * Public browser-facing origin for the site.
+ 	 *
+diff --git a/packages/core/src/astro/middleware.ts b/packages/core/src/astro/middleware.ts
+index 1afddfd31ba611d7fbfd7adbf5de23feb096cc8d..4db5179901e597e081fc75d60e779e9a1cebae3a 100644
+--- a/packages/core/src/astro/middleware.ts
++++ b/packages/core/src/astro/middleware.ts
+@@ -770,7 +770,9 @@ export const onRequest = defineMiddleware(async (context, next) => {
+ 		// The image endpoint EmDash installed reads media bytes from storage and
+ 		// nothing else, so it needs neither the setup probe nor runtime init.
+ 		const imageStorage =
+-			config && !playgroundDb && isImageEndpointRequest(context)
++			// Safe media needs the database to resolve a key to its active revision, so those
++			// requests take the normal runtime path instead of this storage-only shortcut.
++			config && !config.safeMedia && !playgroundDb && isImageEndpointRequest(context)
+ 				? tryGetStorage(config, migrationMode)
+ 				: null;
+ 		if (imageStorage) {
+@@ -1076,6 +1078,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
+ 
+ 					// Direct access (for advanced use cases)
+ 					storage: runtime.storage,
++					mediaReplacement: runtime.mediaReplacement,
+ 					// Lazy getter, not an eager snapshot: `locals.emdash` is built
+ 					// before the per-request scoped db is installed in ALS, so reading
+ 					// `runtime.db` here would capture the per-isolate singleton. Routes
+diff --git a/packages/core/src/astro/routes/api/media/[id]/replace.ts b/packages/core/src/astro/routes/api/media/[id]/replace.ts
+index 1bc0f213c0fa2b85624605548721f8cc11fd6f73..345e1829afaff7e8b8ad65d8745518771d673b90 100644
+--- a/packages/core/src/astro/routes/api/media/[id]/replace.ts
++++ b/packages/core/src/astro/routes/api/media/[id]/replace.ts
+@@ -1,4 +1,5 @@
+ import type { APIRoute } from "astro";
++import { ulid } from "ulidx";
+ 
+ import { requireOwnerPerm, requirePerm } from "#api/authorize.js";
+ import { apiError, apiSuccess, handleError, unwrapResult } from "#api/error.js";
+@@ -7,10 +8,35 @@ import { MUTABLE_MEDIA_CACHE_CONTROL } from "#media/image-endpoint.js";
+ import { normalizeMime } from "#media/mime.js";
+ import { computeContentHash } from "#utils/hash.js";
+ 
++import { MediaRepository } from "../../../../../database/repositories/media.js";
++import type { ReplacementRejectionCode } from "../../../../../media/safe/replacement-service.js";
++
+ export const prerender = false;
+ 
+ const REPLACEABLE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+ 
++/** HTTP status for a refused replacement; `CONFLICT` and `BUSY` are retried by the editor, the rest are not. */
++function statusFor(code: ReplacementRejectionCode): number {
++	switch (code) {
++		case "CONFLICT":
++		case "SOURCE_CHANGED":
++		case "CONFLICTING_OPERATION":
++			return 409;
++		case "BUSY":
++		case "DECODER_UNAVAILABLE":
++		case "TRANSACTIONS_UNSUPPORTED":
++			return 503;
++		case "BACKUP_FAILED":
++		case "SOURCE_UNREADABLE":
++		case "DECODER_CRASHED":
++			return 500;
++		case "TOO_LARGE_BYTES":
++			return 413;
++		default:
++			return 400;
++	}
++}
++
+ export const PUT: APIRoute = async ({ params, request, locals }) => {
+ 	const { emdash, user } = locals;
+ 	const { id } = params;
+@@ -67,6 +93,39 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
+ 			return apiError("INVALID_TYPE", "Replacement file type must match the media item", 400);
+ 		}
+ 
++		const service = emdash.mediaReplacement;
++		if (service) {
++			// Revision-fenced path: the host validates the decoded image, keeps the previous bytes
++			// privately and publishes atomically. Width and height are derived, not client-supplied.
++			const source = await service.getSourceRevision(id);
++			if (!source) return apiError("INVALID_STATE", "Only ready media can be replaced", 400);
++			const result = await service.replace({
++				mediaId: id,
++				operationId: ulid(),
++				expectedRevisionId: source.id,
++				bytes: new Uint8Array(await file.arrayBuffer()),
++				geometry: "any",
++				createdBy: user?.id,
++			});
++			if (!result.ok) return apiError(result.code, result.message, statusFor(result.code));
++			const current = await emdash.handleMediaGet(id);
++			if (!current.success) return unwrapResult(current);
++			return apiSuccess({
++				item: {
++					...current.data.item,
++					url: `/_emdash/api/media/file/${current.data.item.storageKey}`,
++				},
++			});
++		}
++		// Managed media change bytes only through the fenced service; refuse before touching storage.
++		if (await new MediaRepository(emdash.db).isManaged(id)) {
++			return apiError(
++				"MEDIA_MANAGED",
++				"This media is under revision management; enable safe media operations to replace it",
++				409,
++			);
++		}
++
+ 		const metadataResult = mediaReplaceMetadataForm.safeParse({
+ 			width: formData.get("width"),
+ 			height: formData.get("height"),
+diff --git a/packages/core/src/astro/types.ts b/packages/core/src/astro/types.ts
+index 4ddeb3102a499990ac3b72e2666f717766fda86d..5e78d065b201debb096f8ac52e9dd90127cc24ea 100644
+--- a/packages/core/src/astro/types.ts
++++ b/packages/core/src/astro/types.ts
+@@ -611,6 +611,8 @@ export interface EmDashHandlers {
+ 
+ 	// Direct access to storage and database for advanced use cases
+ 	storage: import("../index.js").Storage | null;
++	/** Revision-fenced replacement service; null unless `safeMedia` is configured. */
++	mediaReplacement?: import("../media/safe/replacement-service.js").MediaReplacementService | null;
+ 	db: Kysely<import("../index.js").Database>;
+ 	getPublicMediaUrl?: (storageKey: string) => string;
+ 
+diff --git a/packages/core/src/database/repositories/media-operations.ts b/packages/core/src/database/repositories/media-operations.ts
+index 43e35ea38b918c01371a0fc98889e7aebb63f781..ccc96d6a28433fa7b0976b7117246a774adcd497 100644
+--- a/packages/core/src/database/repositories/media-operations.ts
++++ b/packages/core/src/database/repositories/media-operations.ts
+@@ -30,12 +30,16 @@ const NEXT_STATE: Readonly<Record<OpenMediaOperationState, MediaOperationState |
+ 	original_retained: undefined,
+ };
+ 
++/** `unchanged` requires the source dimensions; `any` accepts the output's own (manual replacement). */
++export type ReplacementGeometry = "unchanged" | "any";
++
+ export interface BeginOperationInput {
+ 	mediaId: string;
+ 	operationId: string;
+ 	kind: MediaOperationKind;
+ 	expectedRevisionId: string;
+ 	candidateSha256: string;
++	geometry?: ReplacementGeometry;
+ 	createdBy?: string;
+ }
+ 
+@@ -45,13 +49,20 @@ export type BeginOperationResult =
+ 
+ /** Canonical identity of an operation request; the same ID may only repeat the same request. */
+ export async function operationFingerprint(
+-	input: Pick<BeginOperationInput, "kind" | "mediaId" | "expectedRevisionId" | "candidateSha256">,
++	input: Pick<
++		BeginOperationInput,
++		"kind" | "mediaId" | "expectedRevisionId" | "candidateSha256" | "geometry"
++	>,
+ ): Promise<string> {
+-	return sha256Hex(
+-		new TextEncoder().encode(
+-			JSON.stringify([input.kind, input.mediaId, input.expectedRevisionId, input.candidateSha256]),
+-		),
+-	);
++	const fields: string[] = [
++		input.kind,
++		input.mediaId,
++		input.expectedRevisionId,
++		input.candidateSha256,
++	];
++	// The default mode keeps the original four-field identity, so earlier journal rows stay valid.
++	if (input.geometry === "any") fields.push("geometry:any");
++	return sha256Hex(new TextEncoder().encode(JSON.stringify(fields)));
+ }
+ 
+ export function isOpenOperation(operation: Pick<MediaOperation, "state">): boolean {
+@@ -190,6 +201,8 @@ export class MediaOperationsRepository {
+ 		mediaId: string;
+ 		expectedRevisionId: string;
+ 		candidate: Pick<MediaRevision, "id" | "size" | "width" | "height" | "content_hash">;
++		/** Drop the focal point, which no longer describes the image, when its geometry changed. */
++		clearFocalPoint?: boolean;
+ 	}): Promise<boolean> {
+ 		const result = await this.db
+ 			.updateTable("media")
+@@ -201,6 +214,7 @@ export class MediaOperationsRepository {
+ 				content_hash: input.candidate.content_hash,
+ 				blurhash: null,
+ 				dominant_color: null,
++				...(input.clearFocalPoint ? { focal_x: null, focal_y: null } : {}),
+ 			})
+ 			.where("id", "=", input.mediaId)
+ 			.where("status", "=", "ready")
+diff --git a/packages/core/src/database/repositories/media.ts b/packages/core/src/database/repositories/media.ts
+index 39becd67fd4fc96d8f222f1197d5ee10a155f9b6..730725413badfe7707298dc986eb84f1aefad86a 100644
+--- a/packages/core/src/database/repositories/media.ts
++++ b/packages/core/src/database/repositories/media.ts
+@@ -549,8 +549,12 @@ export class MediaRepository {
+ 		const updates: Partial<MediaRow> = {};
+ 		if (input.alt !== undefined) updates.alt = input.alt;
+ 		if (input.caption !== undefined) updates.caption = input.caption;
+-		if (input.width !== undefined) updates.width = input.width;
+-		if (input.height !== undefined) updates.height = input.height;
++		// Dimensions of managed media are derived from the validated bytes of the active
++		// revision; a client-supplied value must not make them disagree with it.
++		if (!(await this.isManaged(id))) {
++			if (input.width !== undefined) updates.width = input.width;
++			if (input.height !== undefined) updates.height = input.height;
++		}
+ 		if (input.folderId !== undefined) updates.folder_id = input.folderId;
+ 		if (input.focalX !== undefined && input.focalY !== undefined) {
+ 			updates.focal_x = input.focalX;
+@@ -610,12 +614,24 @@ export class MediaRepository {
+ 			.where("id", "=", id)
+ 			.where("status", "=", "ready")
+ 			.where("storage_key", "=", expectedStorageKey)
++			// Managed media change bytes only through the revision-fenced replacement service.
++			.where("revision_id", "is", null)
+ 			.returningAll()
+ 			.executeTakeFirst();
+ 
+ 		return row ? this.rowToItem(row) : null;
+ 	}
+ 
++	/** Whether the media row is under revision management (see migration 092). */
++	async isManaged(id: string): Promise<boolean> {
++		const row = await this.db
++			.selectFrom("media")
++			.select("revision_id")
++			.where("id", "=", id)
++			.executeTakeFirst();
++		return row?.revision_id != null;
++	}
++
+ 	/**
+ 	 * Delete media item
+ 	 */
+diff --git a/packages/core/src/emdash-runtime.ts b/packages/core/src/emdash-runtime.ts
+index 055ed1307ba4029e120cad989bc9b0e8c2d72afe..01d227c31814edc8aeb315c8dcb4f4bbe30070b3 100644
+--- a/packages/core/src/emdash-runtime.ts
++++ b/packages/core/src/emdash-runtime.ts
+@@ -256,6 +256,7 @@ import {
+ 	type Storage,
+ } from "./index.js";
+ import { getDb } from "./loader.js";
++import type { MediaReplacementService } from "./media/safe/replacement-service.js";
+ import { isRecord } from "./plugin-utils.js";
+ import { CronExecutor, type InvokeCronHookFn } from "./plugins/cron.js";
+ import { definePlugin } from "./plugins/define-plugin.js";
+@@ -495,6 +496,8 @@ export interface RuntimeDependencies {
+ export interface EmDashRuntimeParts {
+ 	db: Kysely<Database>;
+ 	storage: Storage | null;
++	/** Revision-fenced media replacement; null unless `safeMedia` is configured. */
++	mediaReplacement?: MediaReplacementService | null;
+ 	configuredPlugins: ResolvedPlugin[];
+ 	sandboxedPlugins: Map<string, SandboxedPluginInstance>;
+ 	sandboxedPluginEntries: SandboxedPluginEntry[];
+@@ -738,6 +741,7 @@ export class EmDashRuntime {
+ 	 */
+ 	private readonly _db: Kysely<Database>;
+ 	readonly storage: Storage | null;
++	readonly mediaReplacement: MediaReplacementService | null;
+ 	readonly configuredPlugins: ResolvedPlugin[];
+ 	readonly sandboxedPlugins: Map<string, SandboxedPluginInstance>;
+ 	readonly sandboxedPluginEntries: SandboxedPluginEntry[];
+@@ -848,6 +852,7 @@ export class EmDashRuntime {
+ 	constructor(parts: EmDashRuntimeParts) {
+ 		this._db = parts.db;
+ 		this.storage = parts.storage;
++		this.mediaReplacement = parts.mediaReplacement ?? null;
+ 		this.configuredPlugins = parts.configuredPlugins;
+ 		this.sandboxedPlugins = parts.sandboxedPlugins;
+ 		this.sandboxedPluginEntries = parts.sandboxedPluginEntries;
+@@ -1530,8 +1535,22 @@ export class EmDashRuntime {
+ 		// FTS verify/repair is deferred off the cold-start hot path.
+ 		// See EmDashRuntime.ensureSearchHealthy().
+ 
+-		// Initialize storage (sync)
+-		const storage = EmDashRuntime.getStorage(deps);
++		// Initialize storage (sync). With safe media operations enabled, every reader of
++		// media bytes gets a storage that serves the active revision of a stable key.
++		const rawStorage = EmDashRuntime.getStorage(deps);
++		// Imported on demand: the wiring uses Node-only modules that must not load on other hosts.
++		const safeMedia = deps.config.safeMedia
++			? (await import("./media/safe/runtime.js")).createSafeMedia({
++					config: deps.config.safeMedia,
++					storageDescriptor: deps.config.storage,
++					rawStorage,
++					db,
++					resolveDb,
++					maxUploadSize: deps.config.maxUploadSize,
++					onPublished: () => invalidateSiteSettingsCache(),
++				})
++			: null;
++		const storage = safeMedia ? safeMedia.storage : rawStorage;
+ 
+ 		let pluginStates: Map<string, string> = new Map();
+ 		const configuredLocales: string[] =
+@@ -2158,6 +2177,7 @@ export class EmDashRuntime {
+ 		const runtime = new EmDashRuntime({
+ 			db,
+ 			storage,
++			mediaReplacement: safeMedia?.service ?? null,
+ 			// Include bypassed sandboxed plugins in configuredPlugins so route
+ 			// dispatch can find them under sandbox: false (they're treated as
+ 			// trusted plugins for the duration of the bypass).
+diff --git a/packages/core/src/media/safe/replacement-service.ts b/packages/core/src/media/safe/replacement-service.ts
+index 423bbda73b00fd2803b608874898801da64e54a3..df77bc0685b06f431d94754bd52e7d7b494b6fcc 100644
+--- a/packages/core/src/media/safe/replacement-service.ts
++++ b/packages/core/src/media/safe/replacement-service.ts
+@@ -25,6 +25,7 @@ import { ulid } from "ulidx";
+ import type {
+ 	MediaOperation,
+ 	MediaRevision,
++	ReplacementGeometry,
+ } from "../../database/repositories/media-operations.js";
+ import {
+ 	isOpenOperation,
+@@ -68,6 +69,8 @@ export interface ReplaceRequest {
+ 	bytes: Uint8Array;
+ 	/** SHA-256 of the bytes the caller produced. Strongly recommended: see the validator. */
+ 	expectedSha256?: string;
++	/** `unchanged` (default) for optimization; `any` for an editor deliberately replacing the image. */
++	geometry?: ReplacementGeometry;
+ 	createdBy?: string;
+ }
+ 
+@@ -110,6 +113,8 @@ export interface ReplacementServiceOptions {
+ 	storage: Storage;
+ 	originals: PrivateOriginalStore;
+ 	validator: ReturnType<typeof createOutputValidator>;
++	/** Called once after each successful publication, for cache invalidation. */
++	onPublished?: (receipt: PublishedReceipt) => void;
+ 	/** Diagnostic and test seam, called after each step; a throw abandons the operation as a crash would. */
+ 	onStep?: (
+ 		step: ReplacementStep,
+@@ -314,6 +319,7 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			kind: "replace",
+ 			expectedRevisionId: request.expectedRevisionId,
+ 			candidateSha256,
++			geometry: request.geometry,
+ 			createdBy: request.createdBy,
+ 		});
+ 		if (begun.status === "conflict") return rejected("CONFLICTING_OPERATION");
+@@ -345,7 +351,7 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			const validation = await validator.validate(
+ 				request.bytes,
+ 				{ mimeType: source.mime_type, width: source.width, height: source.height },
+-				{ expectedSha256: request.expectedSha256 },
++				{ expectedSha256: request.expectedSha256, geometry: request.geometry },
+ 			);
+ 			if (!validation.ok) {
+ 				// A transient condition must not consume the operation ID.
+@@ -459,12 +465,19 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 				height: candidate.height ?? 0,
+ 				mimeType: candidate.mime_type,
+ 			};
++			const sourceRevision = await repo.getRevision(ready.expected_revision_id);
++			// A focal point describes the old image; keep it only while the geometry is unchanged.
++			const geometryChanged =
++				!sourceRevision ||
++				sourceRevision.width !== candidate.width ||
++				sourceRevision.height !== candidate.height;
+ 			const published = await atomically(async (trx) => {
+ 				const transactional = new MediaOperationsRepository(trx);
+ 				const moved = await transactional.movePointer({
+ 					mediaId,
+ 					expectedRevisionId: ready.expected_revision_id,
+ 					candidate,
++					clearFocalPoint: geometryChanged,
+ 				});
+ 				if (!moved) return false;
+ 				const done = await transactional.publishOperation(mediaId, operationId, receipt);
+@@ -474,6 +487,7 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			});
+ 			if (!published) return reject(operation, "CONFLICT");
+ 			await step("published", mediaId, operationId);
++			options.onPublished?.(receipt);
+ 			return { ok: true, receipt, replayed: false };
+ 		}
+ 
+diff --git a/packages/core/src/media/safe/runtime.ts b/packages/core/src/media/safe/runtime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..156e1a9f82b7c43fd7f92ccb1aab0ab6827e9784
+--- /dev/null
++++ b/packages/core/src/media/safe/runtime.ts
+@@ -0,0 +1,156 @@
++/**
++ * Host wiring for safe media operations: the revision-aware storage that every
++ * reader of media bytes goes through, and the replacement service.
++ *
++ * The first supported profile is local filesystem storage with SQLite on Node.
++ * Enabling it is explicit (`safeMedia.privateDirectory`), and a misconfigured
++ * profile fails at startup instead of falling back to unsafe behavior.
++ */
++
++import { join, resolve } from "node:path";
++
++import type { Kysely } from "kysely";
++
++import type { Database } from "../../database/types.js";
++import type {
++	DownloadResult,
++	ListOptions,
++	ListResult,
++	SignedUploadOptions,
++	SignedUploadUrl,
++	Storage,
++	UploadResult,
++} from "../../storage/types.js";
++import { createDecodeAdmission } from "./admission.js";
++import { resolveDecodeLimits } from "./decode-limits.js";
++import { createLocalPrivateStorage, PrivateStorageConfigError } from "./private-local.js";
++import { createPrivateOriginalStore } from "./private-originals.js";
++import type { MediaReplacementService, PublishedReceipt } from "./replacement-service.js";
++import { createMediaReplacementService } from "./replacement-service.js";
++import { resolveActiveObjectKey } from "./resolve-object.js";
++import { createSharpChildDecoder } from "./sharp-child-decoder.js";
++import { createOutputValidator } from "./validate-output.js";
++
++export interface SafeMediaConfig {
++	/** Directory for retained originals. Must be separate from the public storage and the `public` directory. */
++	privateDirectory: string;
++}
++
++const LOCAL_STORAGE_ENTRYPOINT = "emdash/storage/local";
++/** Stable media keys are flat `{ulid}{ext}`; anything with a slash is not a media row's key. */
++const STABLE_KEY = /^[A-Za-z0-9._-]+$/;
++
++/**
++ * Serves a stable key from the media's active revision. Reads of unmanaged keys
++ * and non-media keys fall through to the wrapped storage, and every other
++ * operation is forwarded unchanged.
++ */
++class RevisionAwareStorage implements Storage {
++	constructor(
++		private readonly inner: Storage,
++		private readonly resolveDb: () => Kysely<Database>,
++	) {
++		const origin = inner.getClientUploadOrigin?.bind(inner);
++		if (origin) this.getClientUploadOrigin = () => origin();
++	}
++
++	private async objectKey(key: string): Promise<string> {
++		return STABLE_KEY.test(key) ? resolveActiveObjectKey(this.resolveDb(), key) : key;
++	}
++
++	async download(key: string): Promise<DownloadResult> {
++		return this.inner.download(await this.objectKey(key));
++	}
++
++	async exists(key: string): Promise<boolean> {
++		return this.inner.exists(await this.objectKey(key));
++	}
++
++	upload(options: Parameters<Storage["upload"]>[0]): Promise<UploadResult> {
++		return this.inner.upload(options);
++	}
++
++	delete(key: string): Promise<void> {
++		return this.inner.delete(key);
++	}
++
++	list(options?: ListOptions): Promise<ListResult> {
++		return this.inner.list(options);
++	}
++
++	getSignedUploadUrl(options: SignedUploadOptions): Promise<SignedUploadUrl> {
++		return this.inner.getSignedUploadUrl(options);
++	}
++
++	getPublicUrl(key: string): string {
++		return this.inner.getPublicUrl(key);
++	}
++
++	// Present only when the wrapped storage has one, because callers test for its existence.
++	getClientUploadOrigin?: () => string;
++}
++
++export function createRevisionAwareStorage(
++	storage: Storage,
++	resolveDb: () => Kysely<Database>,
++): Storage {
++	return new RevisionAwareStorage(storage, resolveDb);
++}
++
++export interface CreateSafeMediaOptions {
++	config: SafeMediaConfig;
++	storageDescriptor: { entrypoint: string; config: unknown } | undefined;
++	/** The active storage, before any decoration. The service reads and writes this one. */
++	rawStorage: Storage | null;
++	db: Kysely<Database>;
++	resolveDb: () => Kysely<Database>;
++	maxUploadSize?: number;
++	onPublished?: (receipt: PublishedReceipt) => void;
++}
++
++export interface SafeMedia {
++	/** Storage for every reader; stable keys resolve to the active revision. */
++	storage: Storage;
++	service: MediaReplacementService;
++}
++
++export function createSafeMedia(options: CreateSafeMediaOptions): SafeMedia {
++	const { config, storageDescriptor, rawStorage } = options;
++	if (!config.privateDirectory) {
++		throw new PrivateStorageConfigError("safeMedia.privateDirectory is required");
++	}
++	if (!rawStorage || storageDescriptor?.entrypoint !== LOCAL_STORAGE_ENTRYPOINT) {
++		throw new PrivateStorageConfigError(
++			"safeMedia currently requires the local filesystem storage adapter",
++		);
++	}
++	const publicDirectories = [join(process.cwd(), "public")];
++	const storageConfig: unknown = storageDescriptor.config;
++	const directory: unknown =
++		typeof storageConfig === "object" && storageConfig !== null
++			? Reflect.get(storageConfig, "directory")
++			: undefined;
++	if (typeof directory === "string") publicDirectories.push(resolve(directory));
++
++	const originals = createPrivateOriginalStore(
++		createLocalPrivateStorage({ directory: config.privateDirectory, publicDirectories }),
++	);
++	const limits = resolveDecodeLimits(
++		options.maxUploadSize === undefined ? {} : { maxBytes: options.maxUploadSize },
++	);
++	const validator = createOutputValidator({
++		decoder: createSharpChildDecoder(),
++		limits,
++		admission: createDecodeAdmission(limits.maxInFlightPixels),
++	});
++	return {
++		storage: createRevisionAwareStorage(rawStorage, options.resolveDb),
++		service: createMediaReplacementService({
++			db: options.db,
++			storage: rawStorage,
++			originals,
++			validator,
++			onPublished: options.onPublished,
++		}),
++	};
++}
+diff --git a/packages/core/src/media/safe/validate-output.ts b/packages/core/src/media/safe/validate-output.ts
+index 643d3cc6dc6c9561e068301b336938a9d6f25cff..7b6dad7b59263a8d799ccb7503538be07d0fd83c 100644
+--- a/packages/core/src/media/safe/validate-output.ts
++++ b/packages/core/src/media/safe/validate-output.ts
+@@ -91,6 +91,12 @@ export interface ValidateOptions {
+ 	 * sent should, so transit corruption is caught.
+ 	 */
+ 	expectedSha256?: string;
++	/**
++	 * `unchanged` (default) requires the source's width and height. `any` accepts the
++	 * output's own, for an editor deliberately replacing an image; every other check
++	 * still applies, and the decoder must still agree with the header.
++	 */
++	geometry?: "unchanged" | "any";
+ }
+ 
+ export interface OutputValidatorOptions {
+@@ -113,7 +119,9 @@ export function createOutputValidator(options: OutputValidatorOptions) {
+ 		): Promise<OutputValidation> {
+ 			const sourceFormat = formatOfMime(source.mimeType);
+ 			if (!sourceFormat) return rejection("UNSUPPORTED_FORMAT");
+-			if (!source.width || !source.height) return rejection("SOURCE_GEOMETRY_UNKNOWN");
++			const requireGeometry = validation.geometry !== "any";
++			if (requireGeometry && (!source.width || !source.height))
++				return rejection("SOURCE_GEOMETRY_UNKNOWN");
+ 			if (bytes.byteLength === 0) return rejection("EMPTY");
+ 			if (bytes.byteLength > limits.maxBytes) return rejection("TOO_LARGE_BYTES");
+ 
+@@ -132,7 +140,7 @@ export function createOutputValidator(options: OutputValidatorOptions) {
+ 			if (!header) return rejection("UNDECODABLE");
+ 			const pixels = header.width * header.height;
+ 			if (pixels > limits.maxPixels) return rejection("TOO_MANY_PIXELS");
+-			if (header.width !== source.width || header.height !== source.height)
++			if (requireGeometry && (header.width !== source.width || header.height !== source.height))
+ 				return rejection("DIMENSIONS_CHANGED");
+ 
+ 			const release = admission.tryAcquire(pixels);
+diff --git a/packages/core/tests/unit/astro/middleware-image-endpoint.test.ts b/packages/core/tests/unit/astro/middleware-image-endpoint.test.ts
+index 8b9fbf273687ace4e9741429468bf193fddf3d08..0d2d169f99686e97a60e81025b1b258c1ccb58f9 100644
+--- a/packages/core/tests/unit/astro/middleware-image-endpoint.test.ts
++++ b/packages/core/tests/unit/astro/middleware-image-endpoint.test.ts
+@@ -135,6 +135,7 @@ beforeEach(() => {
+ 	delete (globalThis as Record<symbol, unknown>)[Symbol.for("emdash:runtime-holder")];
+ 	CONFIG.storage = LOCAL_STORAGE;
+ 	CONFIG.imageEndpointRoute = "/_image";
++	delete (CONFIG as Record<string, unknown>).safeMedia;
+ 	mockCreateRuntime.mockReset().mockResolvedValue(MOCK_RUNTIME);
+ 	vi.mocked(getDb).mockClear();
+ 	vi.mocked(createRequestScopedDb).mockReset().mockReturnValue(null);
+@@ -219,6 +220,18 @@ describe("astro middleware image endpoint requests", () => {
+ 		},
+ 	);
+ 
++	it("takes the runtime path when safe media is configured, so the storage can resolve revisions", async () => {
++		(CONFIG as Record<string, unknown>).safeMedia = { privateDirectory: "/unused" };
++		const { context, locals } = imageRequestContext();
++
++		const response = await onRequest(context, () =>
++			authOnRequest(context as never, imageEndpoint(locals)),
++		);
++
++		expect(mockCreateRuntime).toHaveBeenCalled();
++		expect(await response.text()).toBe(MEDIA_BYTES);
++	});
++
+ 	it("resolves the user of a signed-in image request on an adapter without request scoping", async () => {
+ 		const { context, locals } = imageRequestContext({
+ 			cookieValues: { "astro-session": "session-id" },
+diff --git a/packages/core/tests/unit/media/safe/media-operations-repository.test.ts b/packages/core/tests/unit/media/safe/media-operations-repository.test.ts
+index d4d43ca5de500954b38fe294a17b8aba538a3179..d2d0385542b9e5db505555335eb08af9d6e1ae15 100644
+--- a/packages/core/tests/unit/media/safe/media-operations-repository.test.ts
++++ b/packages/core/tests/unit/media/safe/media-operations-repository.test.ts
+@@ -1,3 +1,4 @@
++import { createHash } from "node:crypto";
+ import { mkdtemp, rm } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+@@ -257,6 +258,17 @@ describe("MediaOperationsRepository journal", () => {
+ 		expect((await repo.beginOperation(request)).status).toBe("existing");
+ 	});
+ 
++	it("keeps the original fingerprint for the default geometry and distinguishes manual replacement", async () => {
++		const legacy = createHash("sha256")
++			.update(JSON.stringify(["replace", "m1", "r1", DIGEST_A]))
++			.digest("hex");
++		expect(await operationFingerprint(base)).toBe(legacy);
++		expect(await operationFingerprint({ ...base, geometry: "unchanged" })).toBe(legacy);
++		expect(await operationFingerprint({ ...base, geometry: "any" })).not.toBe(legacy);
++		expect((await repo.beginOperation({ ...base, geometry: "any" })).status).toBe("created");
++		expect((await repo.beginOperation(base)).status).toBe("conflict");
++	});
++
+ 	it("derives a stable fingerprint from the request fields only", async () => {
+ 		const a = await operationFingerprint(base);
+ 		expect(a).toMatch(/^[0-9a-f]{64}$/);
+diff --git a/packages/core/tests/unit/media/safe/output-validation.test.ts b/packages/core/tests/unit/media/safe/output-validation.test.ts
+index d798d83b3892b2d0e63bd4cf6e76ad23b0f321ef..80b838df05f19f2784c815f7c5cf57b5987082c8 100644
+--- a/packages/core/tests/unit/media/safe/output-validation.test.ts
++++ b/packages/core/tests/unit/media/safe/output-validation.test.ts
+@@ -245,6 +245,68 @@ describe("changed dimensions", () => {
+ 	});
+ });
+ 
++describe("manual replacement geometry", () => {
++	const validate = (
++		bytes: Uint8Array,
++		mimeType: string,
++		width: number | null = SOURCE.width,
++		height: number | null = SOURCE.height,
++		geometry?: "any" | "unchanged",
++		decoder: FullImageDecoder = inProcessDecoder,
++	) =>
++		createOutputValidator({ decoder }).validate(bytes, { mimeType, width, height }, { geometry });
++
++	it("accepts the output's own dimensions when geometry may change, and still decodes fully", async () => {
++		const bigger = await solid(80, 60).png().toBuffer();
++		expect(await validate(bigger, "image/png", 64, 48, "any")).toMatchObject({
++			ok: true,
++			width: 80,
++			height: 60,
++		});
++		expect(await validate(bigger, "image/png", 64, 48)).toMatchObject({
++			ok: false,
++			code: "DIMENSIONS_CHANGED",
++		});
++		expect(await validate(bigger, "image/png", 64, 48, "unchanged")).toMatchObject({
++			ok: false,
++			code: "DIMENSIONS_CHANGED",
++		});
++	});
++
++	it("does not need known source dimensions when geometry may change", async () => {
++		const { png } = await stills();
++		expect(await validate(png, "image/png", null, null, "any")).toMatchObject({ ok: true });
++		expect(await validate(png, "image/png", null, null)).toMatchObject({
++			ok: false,
++			code: "SOURCE_GEOMETRY_UNKNOWN",
++		});
++	});
++
++	it("keeps every other check when geometry may change", async () => {
++		const { jpeg, png } = await stills();
++		const decoder = forbiddenDecoder();
++		expect(await validate(jpeg, "image/png", 64, 48, "any", decoder)).toMatchObject({
++			code: "WRONG_FORMAT",
++		});
++		expect(
++			await validate(withAnimationControl(png), "image/png", 64, 48, "any", decoder),
++		).toMatchObject({ code: "ANIMATED" });
++		expect(await validate(new Uint8Array(0), "image/png", 64, 48, "any", decoder)).toMatchObject({
++			code: "EMPTY",
++		});
++		const bomb = await solid(9000, 9000).png({ compressionLevel: 9 }).toBuffer();
++		expect(await validate(bomb, "image/png", 64, 48, "any", decoder)).toMatchObject({
++			code: "TOO_MANY_PIXELS",
++		});
++		const lying: FullImageDecoder = {
++			decode: async () => ({ format: "png", width: 99, height: 48, frames: 1 }),
++		};
++		expect(await validate(png, "image/png", 64, 48, "any", lying)).toMatchObject({
++			code: "DIMENSIONS_CHANGED",
++		});
++	});
++});
++
+ describe("oversized output", () => {
+ 	it("rejects output over the byte limit before reading it", async () => {
+ 		const { png } = await stills();
+diff --git a/packages/core/tests/unit/media/safe/replacement-service.test.ts b/packages/core/tests/unit/media/safe/replacement-service.test.ts
+index 914ca02fe602e8a209ad3e0ffaf41e1863b45c35..d6f236c41a33432b38c71d73ad09e59a35e13c02 100644
+--- a/packages/core/tests/unit/media/safe/replacement-service.test.ts
++++ b/packages/core/tests/unit/media/safe/replacement-service.test.ts
+@@ -448,6 +448,77 @@ describe("media replacement service", () => {
+ 		});
+ 	});
+ 
++	describe("geometry", () => {
++		it("publishes new dimensions for a manual replacement and drops the focal point; optimization keeps it", async () => {
++			const bigger = await solid(80, 60, "#2060e0").png().toBuffer();
++			const result = await build().replace(
++				request({ bytes: bigger, expectedSha256: sha(bigger), geometry: "any" }),
++			);
++			expect(result).toMatchObject({ ok: true, receipt: { width: 80, height: 60 } });
++			const after = await db
++				.selectFrom("media")
++				.selectAll()
++				.where("id", "=", mediaId)
++				.executeTakeFirstOrThrow();
++			expect([after.width, after.height, after.focal_x, after.focal_y]).toEqual([
++				80,
++				60,
++				null,
++				null,
++			]);
++		});
++
++		it("keeps the focal point when a manual replacement keeps the dimensions", async () => {
++			expect((await build().replace(request({ geometry: "any" }))).ok).toBe(true);
++			const after = await db
++				.selectFrom("media")
++				.selectAll()
++				.where("id", "=", mediaId)
++				.executeTakeFirstOrThrow();
++			expect([after.focal_x, after.focal_y]).toEqual([0.25, 0.75]);
++		});
++
++		it("treats the same ID with a different geometry mode as a different request", async () => {
++			const service = build();
++			expect((await service.replace(request())).ok).toBe(true);
++			expect(await service.replace(request({ geometry: "any" }))).toMatchObject({
++				ok: false,
++				code: "CONFLICTING_OPERATION",
++			});
++			expect(await service.replace(request({ geometry: "unchanged" }))).toMatchObject({
++				ok: true,
++				replayed: true,
++			});
++		});
++
++		it("rejects changed dimensions unless the caller asked for any geometry", async () => {
++			const bigger = await solid(80, 60, "#2060e0").png().toBuffer();
++			expect(
++				await build().replace(
++					request({ operationId: "strict", bytes: bigger, expectedSha256: sha(bigger) }),
++				),
++			).toMatchObject({ ok: false, code: "DIMENSIONS_CHANGED" });
++		});
++
++		it("reports each publication to the host once", async () => {
++			const receipts: string[] = [];
++			const privateStorage = createLocalPrivateStorage({
++				directory: join(root, "private"),
++				publicDirectories: [join(root, "uploads")],
++			});
++			const service = createMediaReplacementService({
++				db,
++				storage: active,
++				originals: createPrivateOriginalStore(privateStorage),
++				validator: createOutputValidator({ decoder: inProcessDecoder }),
++				onPublished: (receipt) => receipts.push(receipt.operationId),
++			});
++			await service.replace(request());
++			await service.replace(request());
++			expect(receipts).toEqual(["op-1"]);
++		});
++	});
++
+ 	describe("conflicts and rejected output", () => {
+ 		it("rejects a stale expected revision durably and writes no candidate or backup", async () => {
+ 			const service = build();
+diff --git a/packages/core/tests/unit/media/safe/safe-media-integration.test.ts b/packages/core/tests/unit/media/safe/safe-media-integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..23f79ee9e1e58d60e08932748cd106dfc11c3b24
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/safe-media-integration.test.ts
+@@ -0,0 +1,452 @@
++import { createHash } from "node:crypto";
++import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Kysely, SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import {
++	handleMediaDelete,
++	handleMediaGet,
++	handleMediaReplaceMetadata,
++} from "../../../../src/api/handlers/media.js";
++import { PUT as replaceRoute } from "../../../../src/astro/routes/api/media/[id]/replace.js";
++import { GET as getAsset } from "../../../../src/astro/routes/api/media/asset/[id]/[filename].js";
++import { GET as getFile } from "../../../../src/astro/routes/api/media/file/[...key].js";
++import { runMigrations } from "../../../../src/database/migrations/runner.js";
++import { MediaOperationsRepository } from "../../../../src/database/repositories/media-operations.js";
++import { MediaRepository } from "../../../../src/database/repositories/media.js";
++import type { Database } from "../../../../src/database/types.js";
++import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
++import { PrivateStorageConfigError } from "../../../../src/media/safe/private-local.js";
++import { createSafeMedia } from "../../../../src/media/safe/runtime.js";
++import { readPluginMediaBytes } from "../../../../src/plugins/media.js";
++import { LocalStorage } from "../../../../src/storage/local.js";
++import { hashStoredObject } from "../../../../src/transfer/export/media.js";
++import { computeContentHash } from "../../../../src/utils/hash.js";
++import { noisy, solid } from "./output-fixtures.js";
++
++const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
++const KEY = "01HZINTEGRATION.png";
++const ADMIN = { id: "admin-1", role: 50 };
++
++describe("safe media integration", () => {
++	let root: string;
++	let db: Kysely<Database>;
++	let raw: LocalStorage;
++	let safe: ReturnType<typeof createSafeMedia>;
++	let originalBytes: Uint8Array;
++	let mediaId: string;
++
++	const open = () =>
++		new Kysely<Database>({
++			dialect: new SqliteDialect({ database: openNodeSqliteDatabase(join(root, "site.db")) }),
++		});
++	const descriptor = () => ({
++		entrypoint: "emdash/storage/local",
++		config: { directory: join(root, "uploads"), baseUrl: "/_emdash/api/media/file" },
++	});
++	const make = (overrides: Partial<Parameters<typeof createSafeMedia>[0]> = {}) =>
++		createSafeMedia({
++			config: { privateDirectory: join(root, "private") },
++			storageDescriptor: descriptor(),
++			rawStorage: raw,
++			db,
++			resolveDb: () => db,
++			...overrides,
++		});
++
++	function locals(overrides: Record<string, unknown> = {}) {
++		return {
++			emdash: {
++				storage: safe.storage,
++				mediaReplacement: safe.service,
++				db,
++				config: { maxUploadSize: 10 * 1024 * 1024 },
++				handleMediaGet: (id: string) => handleMediaGet(db, id),
++				handleMediaReplaceMetadata: (
++					id: string,
++					key: string,
++					input: { size: number; width: number; height: number; contentHash: string },
++				) => handleMediaReplaceMetadata(db, id, key, input),
++				...overrides,
++			},
++			user: ADMIN,
++		};
++	}
++
++	async function putReplacement(
++		bytes: Uint8Array,
++		type = "image/png",
++		extra: Record<string, unknown> = {},
++	) {
++		const form = new FormData();
++		form.set("file", new File([bytes], "new.png", { type }));
++		form.set("width", "1");
++		form.set("height", "1");
++		const response = await replaceRoute({
++			params: { id: mediaId },
++			request: new Request("https://example.com", {
++				method: "PUT",
++				body: form,
++				headers: { "X-EmDash-Request": "1" },
++			}),
++			locals: locals(extra),
++		} as never);
++		return {
++			status: response.status,
++			body: (await response.json()) as {
++				data?: { item: Record<string, unknown> };
++				error?: { code: string };
++			},
++		};
++	}
++
++	const fetchKey = async (storageLocals = locals(), key = KEY) => {
++		const response = await getFile({
++			params: { key },
++			locals: storageLocals,
++			request: new Request("https://example.com"),
++		} as never);
++		return {
++			status: response.status,
++			bytes: response.status === 200 ? new Uint8Array(await response.arrayBuffer()) : null,
++		};
++	};
++	const row = () =>
++		db.selectFrom("media").selectAll().where("id", "=", mediaId).executeTakeFirstOrThrow();
++	const count = async (
++		table: "_emdash_media_revisions" | "_emdash_media_originals" | "_emdash_media_operations",
++	) =>
++		Number(
++			(
++				await db
++					.selectFrom(table)
++					.select((eb) => eb.fn.countAll().as("n"))
++					.executeTakeFirstOrThrow()
++			).n,
++		);
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-safe-media-"));
++		await mkdir(join(root, "uploads"), { recursive: true });
++		db = open();
++		await runMigrations(db);
++		raw = new LocalStorage({
++			directory: join(root, "uploads"),
++			baseUrl: "/_emdash/api/media/file",
++		});
++		originalBytes = await noisy(64, 48, "png");
++		await raw.upload({ key: KEY, body: originalBytes, contentType: "image/png" });
++		const media = await new MediaRepository(db).create({
++			filename: "photo.png",
++			mimeType: "image/png",
++			size: originalBytes.byteLength,
++			width: 64,
++			height: 48,
++			alt: "Alt",
++			caption: "Caption",
++			storageKey: KEY,
++			contentHash: await computeContentHash(originalBytes),
++			status: "ready",
++			authorId: ADMIN.id,
++		});
++		mediaId = media.id;
++		await new MediaRepository(db).update(mediaId, { focalX: 0.25, focalY: 0.75 });
++		safe = make();
++	});
++
++	afterEach(async () => {
++		await db.destroy();
++		await rm(root, { recursive: true, force: true });
++	});
++
++	describe("configuration", () => {
++		it("refuses profiles it cannot make safe, at startup", () => {
++			expect(() => make({ config: { privateDirectory: "" } })).toThrow(PrivateStorageConfigError);
++			expect(() => make({ rawStorage: null })).toThrow(/local filesystem/);
++			expect(() =>
++				make({ storageDescriptor: { entrypoint: "emdash/storage/s3", config: {} } }),
++			).toThrow(/local filesystem/);
++			expect(() =>
++				make({ config: { privateDirectory: join(root, "uploads", "private") } }),
++			).toThrow(PrivateStorageConfigError);
++			expect(() => make({ config: { privateDirectory: root } })).toThrow(PrivateStorageConfigError);
++			expect(() =>
++				make({ config: { privateDirectory: join(process.cwd(), "public", "x") } }),
++			).toThrow(PrivateStorageConfigError);
++		});
++
++		it("passes ordinary storage operations through unchanged", async () => {
++			await safe.storage.upload({
++				key: "other.png",
++				body: new Uint8Array([1, 2, 3]),
++				contentType: "image/png",
++			});
++			expect(await safe.storage.exists("other.png")).toBe(true);
++			expect((await safe.storage.list()).files.map((file) => file.key).toSorted()).toEqual([
++				KEY,
++				"other.png",
++			]);
++			expect(safe.storage.getPublicUrl("other.png")).toBe(raw.getPublicUrl("other.png"));
++			await safe.storage.delete("other.png");
++			expect(await safe.storage.exists("other.png")).toBe(false);
++			expect(await safe.storage.exists("backups/never-resolved-through-the-database")).toBe(false);
++		});
++	});
++
++	describe("manual replacement through the route", () => {
++		it("replaces with new dimensions: identity kept, bytes derived, focal point reset, previous bytes retained", async () => {
++			const bigger = await solid(80, 60, "#2060e0").png().toBuffer();
++			const before = await row();
++			const result = await putReplacement(bigger);
++			expect(result.status).toBe(200);
++			expect(result.body.data?.item).toMatchObject({
++				id: mediaId,
++				storageKey: KEY,
++				width: 80,
++				height: 60,
++				size: bigger.byteLength,
++				url: `/_emdash/api/media/file/${KEY}`,
++			});
++			const after = await row();
++			expect([
++				after.id,
++				after.filename,
++				after.alt,
++				after.caption,
++				after.created_at,
++				after.author_id,
++			]).toEqual([
++				before.id,
++				before.filename,
++				before.alt,
++				before.caption,
++				before.created_at,
++				before.author_id,
++			]);
++			expect([after.focal_x, after.focal_y]).toEqual([null, null]);
++			expect((await fetchKey()).bytes).toEqual(new Uint8Array(bigger));
++			expect(await readFile(join(root, "private", "media-originals", sha(originalBytes)))).toEqual(
++				Buffer.from(originalBytes),
++			);
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++		});
++
++		it("keeps the focal point when the new image has the same dimensions", async () => {
++			const same = await solid(64, 48, "#2060e0").png().toBuffer();
++			expect((await putReplacement(same)).status).toBe(200);
++			const after = await row();
++			expect([after.focal_x, after.focal_y]).toEqual([0.25, 0.75]);
++		});
++
++		it("ignores client-supplied dimensions", async () => {
++			const result = await putReplacement(await solid(80, 60).png().toBuffer());
++			expect(result.body.data?.item).toMatchObject({ width: 80, height: 60 });
++		});
++
++		it("rejects invalid images with a client error and leaves everything unchanged", async () => {
++			const jpeg = await solid(64, 48).jpeg().toBuffer();
++			const truncated = (await noisy(64, 48, "png")).subarray(0, 100);
++			const bomb = await solid(9000, 9000).png({ compressionLevel: 9 }).toBuffer();
++			for (const [bytes, expected] of [
++				[jpeg, "WRONG_FORMAT"],
++				[truncated, "UNDECODABLE"],
++				[bomb, "TOO_MANY_PIXELS"],
++			] as const) {
++				const result = await putReplacement(bytes);
++				expect(result.status, expected).toBe(400);
++				expect(result.body.error?.code).toBe(
++					expected === "UNDECODABLE" ? result.body.error?.code : expected,
++				);
++			}
++			expect((await fetchKey()).bytes).toEqual(new Uint8Array(originalBytes));
++			expect(await count("_emdash_media_originals")).toBe(0);
++			expect((await readdir(join(root, "uploads"))).toSorted()).toEqual([KEY]);
++		});
++
++		it("answers 409 when another writer published after the editor read the source", async () => {
++			const other = await solid(64, 48, "#20e040").png().toBuffer();
++			const racing = {
++				...safe.service,
++				getSourceRevision: async (id: string) => {
++					const source = await safe.service.getSourceRevision(id);
++					expect(
++						(
++							await safe.service.replace({
++								mediaId: id,
++								operationId: "optimizer",
++								expectedRevisionId: source!.id,
++								bytes: other,
++								expectedSha256: sha(other),
++							})
++						).ok,
++					).toBe(true);
++					return source;
++				},
++			};
++			const editorBytes = await solid(64, 48, "#e04020").png().toBuffer();
++			const result = await putReplacement(editorBytes, "image/png", { mediaReplacement: racing });
++			expect(result.status).toBe(409);
++			expect(result.body.error?.code).toBe("CONFLICT");
++			expect((await fetchKey()).bytes).toEqual(new Uint8Array(other));
++		});
++
++		it("refuses legacy replacement of managed media before touching storage", async () => {
++			await safe.service.getSourceRevision(mediaId);
++			const result = await putReplacement(
++				await solid(64, 48, "#e04020").png().toBuffer(),
++				"image/png",
++				{ mediaReplacement: null },
++			);
++			expect(result.status).toBe(409);
++			expect(result.body.error?.code).toBe("MEDIA_MANAGED");
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++		});
++
++		it("still replaces unmanaged media through the legacy path when safe media is off", async () => {
++			const bytes = await solid(64, 48, "#e04020").png().toBuffer();
++			const result = await putReplacement(bytes, "image/png", {
++				mediaReplacement: null,
++				storage: raw,
++			});
++			expect(result.status).toBe(200);
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(bytes));
++			expect(await new MediaRepository(db).isManaged(mediaId)).toBe(false);
++		});
++	});
++
++	describe("every reader serves the active revision", () => {
++		it("serves the new bytes to the file route, asset route, native reads and transfer export, never the superseded ones", async () => {
++			const bytes = await solid(64, 48, "#2060e0").png().toBuffer();
++			expect((await putReplacement(bytes)).status).toBe(200);
++
++			expect((await fetchKey()).bytes).toEqual(new Uint8Array(bytes));
++			const asset = await getAsset({
++				params: { id: mediaId, filename: "photo.png" },
++				locals: locals(),
++				request: new Request("https://example.com"),
++			} as never);
++			expect(new Uint8Array(await asset.arrayBuffer())).toEqual(new Uint8Array(bytes));
++			const native = await readPluginMediaBytes(db, safe.storage, mediaId);
++			expect(native.bytes).toEqual(new Uint8Array(bytes));
++			expect(native.contentHash).toBe(await computeContentHash(bytes));
++			expect(await hashStoredObject(safe.storage, KEY)).toEqual({
++				sha256: sha(bytes),
++				bytes: bytes.byteLength,
++			});
++			expect(
++				await (
++					await safe.storage.download(KEY)
++				).body
++					.getReader()
++					.read()
++					.then((chunk) => chunk.value),
++			).toBeDefined();
++		});
++
++		it("is a real control: a reader holding the undecorated storage would serve the superseded bytes", async () => {
++			const bytes = await solid(64, 48, "#2060e0").png().toBuffer();
++			expect((await putReplacement(bytes)).status).toBe(200);
++			const stale = await hashStoredObject(raw, KEY);
++			expect(stale).toEqual({ sha256: sha(originalBytes), bytes: originalBytes.byteLength });
++		});
++
++		it("serves unmanaged media and other keys exactly as before", async () => {
++			await raw.upload({ key: "plain.png", body: originalBytes, contentType: "image/png" });
++			await new MediaRepository(db).create({
++				filename: "plain.png",
++				mimeType: "image/png",
++				storageKey: "plain.png",
++				status: "ready",
++			});
++			expect((await fetchKey(locals(), "plain.png")).bytes).toEqual(new Uint8Array(originalBytes));
++			expect((await fetchKey(locals(), "absent.png")).status).toBe(404);
++		});
++	});
++
++	describe("deletion", () => {
++		it("keeps recovery data, removes public access and stops stale operations without recreating media", async () => {
++			const optimized = await solid(64, 48, "#2060e0").png().toBuffer();
++			const source = (await safe.service.getSourceRevision(mediaId))!;
++			const first = await safe.service.replace({
++				mediaId,
++				operationId: "optimize-1",
++				expectedRevisionId: source.id,
++				bytes: optimized,
++				expectedSha256: sha(optimized),
++			});
++			expect(first.ok).toBe(true);
++			const revisions = await count("_emdash_media_revisions");
++
++			expect((await handleMediaDelete(db, mediaId, safe.storage)).success).toBe(true);
++
++			expect(await db.selectFrom("media").select("id").where("id", "=", mediaId).execute()).toEqual(
++				[],
++			);
++			expect((await fetchKey()).status).toBe(404);
++			expect(await count("_emdash_media_revisions")).toBe(revisions);
++			expect(await count("_emdash_media_originals")).toBe(1);
++			expect(await readFile(join(root, "private", "media-originals", sha(originalBytes)))).toEqual(
++				Buffer.from(originalBytes),
++			);
++			expect((await fetchKey(locals(), `media-revisions/${sha(optimized)}.png`)).status).toBe(404);
++
++			const other = await solid(64, 48, "#20e040").png().toBuffer();
++			const stale = await safe.service.replace({
++				mediaId,
++				operationId: "optimize-2",
++				expectedRevisionId: first.ok ? first.receipt.newRevisionId : "",
++				bytes: other,
++				expectedSha256: sha(other),
++			});
++			expect(stale).toMatchObject({ ok: false, code: "CONFLICT" });
++			expect(await db.selectFrom("media").select("id").where("id", "=", mediaId).execute()).toEqual(
++				[],
++			);
++			expect(
++				await safe.service.replace({
++					mediaId,
++					operationId: "optimize-1",
++					expectedRevisionId: source.id,
++					bytes: optimized,
++					expectedSha256: sha(optimized),
++				}),
++			).toMatchObject({ ok: true, replayed: true });
++			expect(
++				(await new MediaOperationsRepository(db).getOperation(mediaId, "optimize-1"))?.state,
++			).toBe("published");
++		});
++	});
++
++	describe("legacy writers cannot desynchronize managed media", () => {
++		it("ignores client-supplied dimensions for managed rows and accepts them for unmanaged ones", async () => {
++			const repo = new MediaRepository(db);
++			expect(await repo.update(mediaId, { width: 70, height: 50, alt: "A1" })).toMatchObject({
++				width: 70,
++				height: 50,
++				alt: "A1",
++			});
++			await repo.update(mediaId, { width: 64, height: 48 });
++			await safe.service.getSourceRevision(mediaId);
++			expect(await repo.update(mediaId, { width: 999, height: 999, alt: "A2" })).toMatchObject({
++				width: 64,
++				height: 48,
++				alt: "A2",
++			});
++		});
++
++		it("refuses the legacy file replacement of a managed row and leaves it untouched", async () => {
++			await safe.service.getSourceRevision(mediaId);
++			const result = await new MediaRepository(db).replaceReadyFile(mediaId, KEY, {
++				size: 1,
++				width: 1,
++				height: 1,
++				contentHash: "sha1:x",
++			});
++			expect(result).toBeNull();
++			expect(await row()).toMatchObject({ width: 64, height: 48 });
++		});
++	});
++});

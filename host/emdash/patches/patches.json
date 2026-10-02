@@ -76,6 +76,38 @@
         "M\tpackages/core/src/transfer/staging/keys.ts",
         "A\tpackages/core/tests/unit/media/safe/replacement-service.test.ts"
       ]
+    },
+    {
+      "name": "0004-fenced-writers-and-readers.patch",
+      "tasks": [
+        "2.4"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/astro/middleware-image-endpoint.test.ts",
+        "packages/core/tests/unit/api/media-file-private-keys.test.ts"
+      ],
+      "scope": "Opt-in `safeMedia` configuration, startup wiring and a revision-aware storage that every reader of media bytes goes through; the manual replace route using the fenced service (any geometry, focal point reset on changed geometry); legacy byte writes and client-supplied dimensions refused for managed rows; deletion leaving recovery data and failing stale operations. Exercised through the real route handlers, file-backed SQLite and local storage.",
+      "limits": "Node/SQLite and local storage only; D1 and other storage adapters are refused at startup. The image endpoint's transform pipeline itself is not run against a replaced image (only that its requests take the runtime path), and the delivery freshness bounds are task 3.2. Deleting media deliberately keeps its revisions, originals and journal. No bridge or native replace operation exists yet (task 3.1). Orphan cleanup and restore are tasks 2.5 and 2.6.",
+      "sha256": "b551cbe0fa337d505476934a5689f7f71b9c10ee28eb1ce83ddc69aae9f4728e",
+      "resultingTree": "2324fa8efaf18c23e72d1c88ebe9f77239598354",
+      "files": [
+        "M\tpackages/core/src/astro/integration/index.ts",
+        "M\tpackages/core/src/astro/integration/runtime.ts",
+        "M\tpackages/core/src/astro/middleware.ts",
+        "M\tpackages/core/src/astro/routes/api/media/[id]/replace.ts",
+        "M\tpackages/core/src/astro/types.ts",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/database/repositories/media.ts",
+        "M\tpackages/core/src/emdash-runtime.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "A\tpackages/core/src/media/safe/runtime.ts",
+        "M\tpackages/core/src/media/safe/validate-output.ts",
+        "M\tpackages/core/tests/unit/astro/middleware-image-endpoint.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/media-operations-repository.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/output-validation.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/replacement-service.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/safe-media-integration.test.ts"
+      ]
     }
   ]
 }

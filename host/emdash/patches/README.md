@@ -9,6 +9,7 @@ tree, changed files, related tests, scope and limits.
 | [`0001-media-revisions-private-originals.patch`](0001-media-revisions-private-originals.patch) | Migration 092, revision/original/operation records, digest-verified private originals, local private storage, public-route guard. |
 | [`0002-bounded-output-validation.patch`](0002-bounded-output-validation.patch) | Output validator: header checks, animation and format refusal, digest declaration, admission budget and a killable Sharp child-process full decode. Adds Sharp as an optional peer. |
 | [`0003-staged-replacement-receipts.patch`](0003-staged-replacement-receipts.patch) | Replacement service: staged immutable candidates, verified private originals, single-transaction publication with a durable receipt, idempotent resume, and the file route resolving stable keys to the active revision. |
+| [`0004-fenced-writers-and-readers.patch`](0004-fenced-writers-and-readers.patch) | Opt-in `safeMedia`: startup wiring, revision-aware storage for every reader, the editor replace route using the fenced service, legacy writers fenced. |
 
 Patches are cumulative and apply in order; each records the git tree it produces.
 
