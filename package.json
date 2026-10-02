@@ -2,6 +2,10 @@
   "name": "verco-plugins",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercoapp/verco-plugins.git"
+  },
   "type": "module",
   "packageManager": "pnpm@10.18.3",
   "engines": {

@@ -52,10 +52,10 @@ cadence, extract it to its own repository instead of special-casing it here.
 
 ## Branches and pull requests
 
-`main` holds the qualification prototypes. `add-safe-media-operations` adds recovery and decoder
-budgets. `safe-media-host-implementation` is stacked on it and adds the host patches. Open pull
-requests stacked the same way (the second targets the first's branch). Keep feature branches current
-by merging the base branch into them, not by rebasing and force-pushing. Never force-push. Pull request
+Branch from `main`, one change per pull request; stack a dependent pull request on its base branch
+and retarget it after the base merges. Pull requests are squash-merged. Keep feature branches current
+by merging the base branch into them, not by rebasing and force-pushing. Never force-push. CI
+(`.github/workflows/ci.yml`) must pass on Node 22.16 and the current Node release. Pull request
 descriptions follow the same publication rules as commits: no references to local-only documents.
 
 ## Working conventions
