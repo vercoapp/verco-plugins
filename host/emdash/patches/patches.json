@@ -1,0 +1,35 @@
+{
+  "baseCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+  "patches": [
+    {
+      "name": "0001-media-revisions-private-originals.patch",
+      "tasks": [
+        "2.1"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/api/media-file-private-keys.test.ts",
+        "packages/core/tests/unit/transfer/staging.test.ts",
+        "packages/core/tests/unit/database/migration-imports.test.ts"
+      ],
+      "scope": "Migration 092, revision/original/operation repository, digest-verified private original store, local private storage guards, and public-route refusal of the originals prefix, run on Node/SQLite in the patched worktree with every migration applied. Operation records are verified across a reopened file-backed database.",
+      "limits": "No Postgres, D1 or Cloudflare run; no runtime or integration wiring of private storage; no editor, native or bridge writer integration; the journal has no publication transition yet.",
+      "sha256": "83b7e2d100f34f378d289b4f8e4b7590a81ec5dbc8b264956a7483e6add6135d",
+      "resultingTree": "e6018576d1df51b87fbad003ae5881b2a62eb68c",
+      "files": [
+        "A\tpackages/core/src/database/migrations/092_safe_media_operations.ts",
+        "M\tpackages/core/src/database/migrations/runner.ts",
+        "A\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/database/types.ts",
+        "A\tpackages/core/src/media/safe/digest.ts",
+        "A\tpackages/core/src/media/safe/original-keys.ts",
+        "A\tpackages/core/src/media/safe/private-local.ts",
+        "A\tpackages/core/src/media/safe/private-originals.ts",
+        "M\tpackages/core/src/transfer/staging/keys.ts",
+        "A\tpackages/core/tests/unit/database/migrations/092_safe_media_operations.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/media-operations-repository.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/private-originals-exposure.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/private-originals.test.ts"
+      ]
+    }
+  ]
+}
