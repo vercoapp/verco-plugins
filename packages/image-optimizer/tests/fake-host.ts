@@ -97,6 +97,18 @@ export function fakeHost(library: FakeMedia[], options: { readBytes?: boolean } 
       kv.set(key, { value: structuredClone(value), revision: revisions });
       return { applied: true, revision: String(revisions) } as const;
     },
+    async set(key: string, value: unknown) {
+      revisions += 1;
+      kv.set(key, { value: structuredClone(value), revision: revisions });
+    },
+    async delete(key: string) {
+      return kv.delete(key);
+    },
+    async list(prefix = '') {
+      return [...kv]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([key, entry]) => ({ key, value: structuredClone(entry.value) }));
+    },
   });
 
   const media = bridge({

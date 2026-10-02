@@ -19,8 +19,14 @@ export const ACTION_RESULTS_PAGE = 'results_page';
 /** Declared because tables require one; the skipped list shows a single page. */
 export const ACTION_SKIPPED_PAGE = 'skipped_page';
 export const ACTION_FAILED_PAGE = 'failed_page';
+/** Declared because tables require one; the optimized list shows a single page. */
+export const ACTION_OPTIMIZED_PAGE = 'optimized_page';
 /** Native edition: process one image with the current settings and show the numbers. */
 export const ACTION_SAMPLE = 'sample_image';
+/** Native edition, on a host that allows it: replace one image with its optimized output. */
+export const ACTION_APPLY = 'apply_image';
+/** Native edition, on a host that allows it: put back the original of one optimized image. */
+export const ACTION_RESTORE = 'restore_image';
 export const SKIPPED_SHOWN = 50;
 
 export type AdminRequest =
@@ -83,6 +89,57 @@ export interface NativeReportView {
   sample?: SampleView;
 }
 
+/** What the native edition recorded about an image it optimized. The host holds the original. */
+export interface AppliedRecord {
+  mediaId: string;
+  filename: string;
+  /** `superseded`: the image was changed by someone else after the optimization. */
+  state: 'optimized' | 'restored' | 'superseded';
+  operationId: string;
+  sourceRevisionId: string;
+  /** The revision the last operation published. */
+  revisionId: string;
+  /** SHA-256 of the original the host retained. */
+  originalSha256: string | null;
+  inputBytes: number;
+  outputBytes: number;
+  preset: string;
+  removeGps: boolean;
+  policyKey: string;
+  appliedAt: string;
+  restoredAt?: string;
+}
+
+/** Whether apply and restore are allowed on this host, and why not. */
+export interface MutationsView {
+  apply: boolean;
+  restore: boolean;
+  reason: string;
+  message: string;
+  /** Images this plugin optimized and has not restored, newest first. */
+  optimized: AppliedRecord[];
+}
+
+type ActionBase = {
+  action: 'apply' | 'restore';
+  mediaId: string;
+  filename: string | null;
+  /** Apply only: the image was first restored to its original, to optimize it under new settings. */
+  reoptimized?: boolean;
+};
+
+/** The outcome of one apply or restore. */
+export type ActionOutcome = ActionBase &
+  (
+    | { outcome: 'optimized'; replayed: boolean; inputBytes: number; outputBytes: number; revisionId: string }
+    | { outcome: 'restored'; replayed: boolean; sha256: string; bytes: number; revisionId: string }
+    | { outcome: 'unavailable'; reason: string; message: string }
+    | { outcome: 'skipped'; reason: string; message: string; inputBytes?: number; outputBytes?: number }
+    | { outcome: 'conflict' | 'nothing-to-restore' | 'uncertain'; message: string }
+    | { outcome: 'no-original'; message: string; retryable?: boolean }
+    | { outcome: 'failed'; code: string; message: string; retryable?: boolean }
+  );
+
 export interface ReportView {
   run: ScanRun | null;
   results: ResultsPage;
@@ -95,6 +152,10 @@ export interface ReportView {
   locale: string;
   /** Native edition only, and only when it can measure. */
   native?: NativeReportView | null;
+  /** Native edition only: apply and restore, allowed or not. */
+  mutations?: MutationsView;
+  /** Native edition only: the outcome of the apply or restore just requested. */
+  action?: ActionOutcome;
 }
 
 const SKIP_LABELS: Record<ResultSkipReason, string> = {
@@ -284,6 +345,43 @@ function sampleButton(mediaId: string, label = 'Sample') {
   return { type: 'button' as const, action_id: ACTION_SAMPLE, label, value: { mediaId } };
 }
 
+function applyButton(mediaId: string, filename: string) {
+  return {
+    type: 'button' as const,
+    action_id: ACTION_APPLY,
+    label: 'Apply',
+    value: { mediaId },
+    confirm: {
+      title: `Optimize ${filename}?`,
+      text: 'The image is re-encoded with the current settings and its file is replaced in place, only if the saving reaches the thresholds and the image has not changed meanwhile. The host keeps the original, and Restore puts it back byte for byte. ID, address, alt text, caption and focal point stay as they are.',
+      confirm: 'Apply',
+      deny: 'Cancel',
+    },
+  };
+}
+
+function restoreButton(mediaId: string, filename: string) {
+  return {
+    type: 'button' as const,
+    action_id: ACTION_RESTORE,
+    label: 'Restore',
+    value: { mediaId },
+    confirm: {
+      title: `Restore the original of ${filename}?`,
+      text: 'The original the host kept is put back byte for byte, unless the image was changed since it was optimized.',
+      confirm: 'Restore',
+      deny: 'Cancel',
+      style: 'danger' as const,
+    },
+  };
+}
+
+/** Restore for an image this plugin optimized, Apply for the others. */
+function changeButton(mutations: MutationsView, mediaId: string, filename: string) {
+  const optimized = mutations.optimized.some((entry) => entry.mediaId === mediaId);
+  return optimized && mutations.restore ? restoreButton(mediaId, filename) : applyButton(mediaId, filename);
+}
+
 function resultsTable(view: ReportView): Block {
   const { run, results, locale } = view;
   const labelled = labelSavings(view);
@@ -300,6 +398,7 @@ function resultsTable(view: ReportView): Block {
       { key: 'dimensions', label: 'Dimensions' },
       { key: 'format', label: 'Format', format: 'badge' },
       ...(view.native ? [{ key: 'sample', label: 'Sample', format: 'element' as const }] : []),
+      ...(view.mutations?.apply ? [{ key: 'change', label: 'Optimize', format: 'element' as const }] : []),
     ],
     rows: results.items.map(({ id, data }) => ({
       file: data.filename,
@@ -309,6 +408,7 @@ function resultsTable(view: ReportView): Block {
       saving: savingCell(data, locale, labelled),
       findings: whyCell(data, run),
       ...(view.native ? { sample: sampleButton(id) } : {}),
+      ...(view.mutations?.apply ? { change: changeButton(view.mutations, id, data.filename) } : {}),
     })),
     page_action_id: ACTION_RESULTS_PAGE,
     empty_text: run ? 'No images need attention.' : 'Run a scan to see results.',
@@ -464,9 +564,109 @@ function contextText(run: ScanRun, locale: string): string {
   return parts.join(' ');
 }
 
+function savingText(before: number, after: number, locale: string): string {
+  const saving = before - after;
+  return `${formatBytes(before, locale)} to ${formatBytes(after, locale)}, ${formatBytes(saving, locale)} (${percent(saving, before)}%) smaller`;
+}
+
+const ACTION_TITLES: Record<ActionOutcome['outcome'], string> = {
+  optimized: 'optimized',
+  restored: 'restored',
+  unavailable: 'not changed: apply and restore are not available',
+  skipped: 'not changed',
+  conflict: 'not changed: it changed meanwhile',
+  'nothing-to-restore': 'nothing to restore',
+  uncertain: 'outcome not confirmed',
+  'no-original': 'no original to restore',
+  failed: 'not changed',
+};
+
+/** The outcome of an apply or restore just requested. */
+function actionBlocks(action: ActionOutcome, locale: string): Block[] {
+  const name = action.filename ?? 'The image';
+  const title = `${name}: ${ACTION_TITLES[action.outcome]}`;
+  const reoptimized = action.reoptimized ? ' It was first restored to its retained original, so the new settings start from the original.' : '';
+  switch (action.outcome) {
+    case 'optimized':
+      return [
+        {
+          type: 'banner',
+          title,
+          description: `${savingText(action.inputBytes, action.outputBytes, locale)}. The host keeps the original; Restore puts it back byte for byte.${reoptimized}${action.replayed ? ' The host had already made this change, so it returned its earlier receipt and changed nothing again.' : ''}`,
+        },
+      ];
+    case 'restored':
+      return [
+        {
+          type: 'banner',
+          title,
+          description: `The original is active again, byte for byte: ${formatBytes(action.bytes, locale)}, SHA-256 ${action.sha256.slice(0, 16)}….${action.replayed ? ' The host had already restored it and returned its earlier receipt.' : ''}`,
+        },
+      ];
+    case 'skipped': {
+      const numbers =
+        action.inputBytes !== undefined && action.outputBytes !== undefined
+          ? ` Measured: ${formatBytes(action.inputBytes, locale)} to ${formatBytes(action.outputBytes, locale)}.`
+          : '';
+      return [{ type: 'banner', title, description: `${action.message}${numbers}` }];
+    }
+    case 'conflict':
+    case 'uncertain':
+    case 'unavailable':
+    case 'nothing-to-restore':
+    case 'no-original':
+      return [{ type: 'banner', variant: 'alert', title, description: action.message }];
+    case 'failed':
+      return [{ type: 'banner', variant: 'error', title, description: `${action.message} (${action.code})` }];
+  }
+}
+
+/** Whether apply and restore are allowed, why not, and the images this plugin optimized. */
+function mutationBlocks(mutations: MutationsView, locale: string): Block[] {
+  const blocks: Block[] = [];
+  if (!mutations.apply && !mutations.restore) {
+    blocks.push({
+      type: 'context',
+      text: `Read-only: apply and restore are not available. ${mutations.message} Nothing is changed by this plugin.`,
+    });
+  } else {
+    blocks.push({
+      type: 'context',
+      text: `${mutations.apply ? 'Apply replaces one image in place with its optimized output, only when the saving reaches both thresholds (and never less than 10 KiB and 5%) and the image has not changed since it was read.' : 'Applying is not available.'} The host keeps every original, and Restore puts it back byte for byte. ${mutations.message}`,
+    });
+  }
+  if (mutations.optimized.length === 0) return blocks;
+  blocks.push({
+    type: 'accordion',
+    label: `Optimized by this plugin (${formatCount(mutations.optimized.length, locale)})`,
+    default_open: false,
+    blocks: [
+      {
+        type: 'table',
+        block_id: 'optimized',
+        columns: [
+          { key: 'file', label: 'File' },
+          { key: 'saving', label: 'Saving' },
+          { key: 'preset', label: 'Preset', format: 'badge' },
+          ...(mutations.restore ? [{ key: 'restore', label: 'Original', format: 'element' as const }] : []),
+        ],
+        rows: mutations.optimized.map((entry) => ({
+          file: entry.filename,
+          saving: savingText(entry.inputBytes, entry.outputBytes, locale),
+          preset: entry.preset,
+          ...(mutations.restore ? { restore: restoreButton(entry.mediaId, entry.filename) } : {}),
+        })),
+        page_action_id: ACTION_OPTIMIZED_PAGE,
+      },
+    ],
+  });
+  return blocks;
+}
+
 export function reportPage(view: ReportView, toast?: BlockResponse['toast']): BlockResponse {
   const { run, locale } = view;
   const blocks: Block[] = [{ type: 'header', text: 'Image report' }];
+  if (view.action) blocks.push(...actionBlocks(view.action, locale));
   if (view.native?.sample) blocks.push(...sampleBlocks(view.native.sample, locale));
 
   if (!run) {
@@ -479,6 +679,7 @@ export function reportPage(view: ReportView, toast?: BlockResponse['toast']): Bl
       actions: [{ type: 'button', action_id: ACTION_START, label: 'Start scan', style: 'primary' }],
     });
     if (view.native) blocks.push(...nativeSettingsBlocks(view.native));
+    if (view.mutations) blocks.push(...mutationBlocks(view.mutations, locale));
     return { blocks, ...(toast ? { toast } : {}) };
   }
 
@@ -507,6 +708,7 @@ export function reportPage(view: ReportView, toast?: BlockResponse['toast']): Bl
     ],
   });
   if (view.native) blocks.push(...nativeSettingsBlocks(view.native));
+  if (view.mutations) blocks.push(...mutationBlocks(view.mutations, locale));
 
   blocks.push({ type: 'divider' });
   blocks.push({

@@ -8,6 +8,8 @@ import type { BlockResponse } from '@emdash-cms/blocks/server';
 import type { CronEvent, MediaAfterUploadEvent, PluginContext, SandboxedRouteContext } from 'emdash/plugin';
 
 import {
+  ACTION_APPLY,
+  ACTION_RESTORE,
   ACTION_RESULTS_PAGE,
   ACTION_SAMPLE,
   ACTION_START,
@@ -18,6 +20,8 @@ import {
   SAVINGS_WIDGET,
   savingsWidget,
   SKIPPED_SHOWN,
+  type ActionOutcome,
+  type MutationsView,
   type NativeReportView,
   type ReportView,
   type SampleView,
@@ -50,6 +54,18 @@ export interface NativeScan {
   report(ctx: PluginContext, deps: ScanDeps, settings: Settings): NativeReportView | null;
   /** Throws `RangeError` for settings the processor cannot use. */
   sample(ctx: PluginContext, deps: ScanDeps, settings: Settings, mediaId: string): Promise<SampleView | null>;
+  /** Apply and restore, which the host may or may not allow. */
+  mutations?: NativeMutations;
+}
+
+/**
+ * Single-image apply and restore. Each method asks the host whether they are allowed and returns an
+ * `unavailable` outcome, changing nothing, when they are not.
+ */
+export interface NativeMutations {
+  view(ctx: PluginContext): Promise<MutationsView>;
+  apply(ctx: PluginContext, settings: Settings, mediaId: string): Promise<ActionOutcome>;
+  restore(ctx: PluginContext, mediaId: string): Promise<ActionOutcome>;
 }
 
 function deps(ctx: PluginContext): ScanDeps {
@@ -73,7 +89,7 @@ async function readSettings(ctx: PluginContext): Promise<Settings> {
  * Scan options from plugin settings, which use kilobytes and percent; unset settings take the
  * defaults. Throws `RangeError` for values the scan cannot use.
  */
-function optionsFrom(settings: Settings): ScanOptions {
+export function scanOptionsFrom(settings: Settings): ScanOptions {
   const [maxDimension, minSavingsKB, minSavingsPercent] = ['maxDimension', 'minSavingsKB', 'minSavingsPercent'].map(
     (key) => settings.get(key),
   );
@@ -100,7 +116,7 @@ async function beginScan(ctx: PluginContext, native?: NativeScan): Promise<Begin
   let measure: MeasureSpec | null = null;
   try {
     const settings = await readSettings(ctx);
-    options = optionsFrom(settings);
+    options = scanOptionsFrom(settings);
     if (native) measure = native.measureSpec(ctx, deps(ctx), settings);
   } catch (error) {
     if (!(error instanceof RangeError)) throw error;
@@ -194,7 +210,7 @@ export async function handleCron(event: CronEvent, ctx: PluginContext, native?: 
  * for an encode. A measured run's report labels them as estimates until the next scan.
  */
 export async function handleUpload(event: MediaAfterUploadEvent, ctx: PluginContext): Promise<void> {
-  await recordUpload(deps(ctx), event.media.id, optionsFrom(await readSettings(ctx)));
+  await recordUpload(deps(ctx), event.media.id, scanOptionsFrom(await readSettings(ctx)));
 }
 
 /** The Block Kit route behind the report page and the dashboard widget. */
@@ -211,11 +227,36 @@ export async function handleAdmin(
 
   // The native additions need the settings; the sandboxed edition does not read them here.
   const settings = native ? await readSettings(ctx) : null;
-  const withNative = async (view: ReportView, sample?: SampleView | null): Promise<ReportView> => {
+  const withNative = async (
+    view: ReportView,
+    sample?: SampleView | null,
+    action?: ActionOutcome,
+  ): Promise<ReportView> => {
     if (!native || !settings) return view;
     const extras = native.report(ctx, deps(ctx), settings);
-    return { ...view, native: extras && sample ? { ...extras, sample } : extras };
+    const offered = native.mutations ? await native.mutations.view(ctx) : null;
+    // On a host without safe-media access, an edition that cannot measure renders the registry
+    // edition's page, as before; elsewhere the page says why apply and restore are unavailable.
+    const mutations = offered && (extras || offered.reason !== 'missing-host-operation' || offered.optimized.length > 0) ? offered : null;
+    return {
+      ...view,
+      native: extras && sample ? { ...extras, sample } : extras,
+      ...(mutations ? { mutations } : {}),
+      ...(action ? { action } : {}),
+    };
   };
+
+  const mutation = request?.kind === 'action' && request.mediaId ? request.mediaId : null;
+  if (native?.mutations && settings && mutation && request?.kind === 'action') {
+    if (request.actionId === ACTION_APPLY) {
+      const action = await native.mutations.apply(ctx, settings, mutation);
+      return reportPage(await withNative(await loadReport(ctx, null, locale), null, action));
+    }
+    if (request.actionId === ACTION_RESTORE) {
+      const action = await native.mutations.restore(ctx, mutation);
+      return reportPage(await withNative(await loadReport(ctx, null, locale), null, action));
+    }
+  }
 
   if (request?.kind === 'action' && request.actionId === ACTION_START) {
     const outcome = await beginScan(ctx, native);

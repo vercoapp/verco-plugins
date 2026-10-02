@@ -1,7 +1,7 @@
 # image-optimizer
 
 An EmDash plugin that reports images in the media library that are probably larger than they
-need to be. It is **read-only for now**: it never changes, replaces or deletes media.
+need to be. It is **read-only for now**: as shipped, it does not change, replace or delete media.
 
 Published in the EmDash plugin registry as a sandboxed plugin,
 [`@verco.app/image-optimizer`](https://plugins.emdashcms.com/plugins/@verco.app/image-optimizer).
@@ -17,10 +17,13 @@ dialog lists one permission, `media:read`: metadata of ready media, without file
 ## Native edition
 
 The same package also provides the report as a native plugin, for a site that cannot use the registry
-or its sandbox. It is **read-only like the registry edition**: it reports and never changes media. It
-has the same plugin ID, storage, settings, routes, report page and widget, so a site that switches
-between the editions keeps its scan results and settings. Where the registry edition estimates
-savings from metadata, the native edition can [measure them](#measured-savings-native-edition).
+or its sandbox. On every host it is **read-only like the registry edition** by default: it reports and
+does not change media. It has the same plugin ID, storage, settings, routes, report page and widget, so
+a site that switches between the editions keeps its scan results and settings. Where the registry
+edition estimates savings from metadata, the native edition can
+[measure them](#measured-savings-native-edition). It also contains
+[apply and restore](#apply-and-restore-native-edition-pilot), which stay disabled on every host until a
+hosted profile has been qualified.
 
 A native plugin **runs without isolation, in the site process**. EmDash's capability checks still gate
 what the plugin's context offers, but they are not a security boundary: the plugin's code has the same
@@ -49,13 +52,14 @@ only, not yet on a running EmDash site.
 With [Sharp](https://sharp.pixelplumbing.com/) installed in the site (`sharp` is an optional peer
 dependency, tested with 0.35.4), a native scan **measures** each saving instead of estimating it. It
 reads each image's bytes, re-encodes them locally in the same format and at the same dimensions with
-the configured preset and metadata policy, records the output size, and discards the output. It
-never writes media: the plugin has no capability to, and the scan only reads. Without Sharp, or on a
+the configured preset and metadata policy, records the output size, and discards the output. The
+scan never writes media: it only reads. Without Sharp, or on a
 host that does not grant byte access, the native edition estimates from metadata like the registry
 edition.
 
-The native edition declares one capability more than the registry edition, `media:bytes:read`, to
-read image bytes. It cannot write media either.
+The native edition declares one capability more than the registry edition on published EmDash,
+`media:bytes:read`, to read image bytes; there it cannot write media. On the patched host it also
+declares `media:bytes:replace`, used only by [apply and restore](#apply-and-restore-native-edition-pilot).
 
 - **Results.** Each stored result is marked `measured` or `estimated`, and the report labels savings
   accordingly. A measured image is listed when its saving reaches both thresholds in the settings
@@ -90,6 +94,64 @@ A sample processes one image with the current settings and shows the byte counts
 format before and after, the time taken and the encoder options. It changes nothing: neither the
 media nor the scan results. It shows numbers only, no images: Block Kit shows an image only by URL,
 and the processed output is never stored, so it has none.
+
+### Apply and restore (native edition, pilot)
+
+The native edition can replace one image in place with its optimized output, and put the original
+back. **Both are disabled on every host.** They need the
+[patched EmDash host](https://github.com/vercoapp/verco-plugins/blob/main/host/emdash/patches/README.md)
+with `safeMedia` configured, which gives native plugins that declare `media:bytes:replace` a fenced
+replace and restore. Published EmDash has no such access: there the plugin does not declare the
+capability and stays read-only. Even on the patched host, the plugin allows apply and restore only
+when the host's reported profile (runtime, database, storage, locks) is on a list of qualified
+profiles, and that list is empty: no profile has passed qualification yet. Elsewhere the report says
+why apply and restore are unavailable, and the routes answer `unavailable` and change nothing.
+
+What has been exercised: the plugin's own tests against an in-memory model of the host, and an
+end-to-end test against the patched host's runtime on Node with SQLite and local storage (run when the
+pilot checkout from `pnpm host:pilot` is present). Nothing else: not object storage, D1, Cloudflare or
+several processes, and not a hosted site.
+
+For testing only, a site operator can allow a profile explicitly. This is **unsupported** until that
+profile is qualified, and is at the operator's risk:
+
+```js
+imageOptimizerPlugin({
+  qualifiedProfiles: [{ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' }],
+});
+```
+
+- **Apply** (button *Apply* per result in the report, or `POST .../apply` with `{ "mediaId": ... }`)
+  reads the image's active revision and bytes, re-encodes them with the current preset and metadata
+  policy, and submits the output only when the saving reaches both thresholds in the settings, and never
+  less than 10 KiB and 5%. The host publishes it only if the image is still the revision that was read,
+  in the same format and at the same dimensions; if an editor changed the image meanwhile, nothing is
+  published and the report says so. The media item keeps its ID, file address, alt text, caption and
+  focal point, so content that references it now shows the smaller file. Applying again with the same
+  settings changes nothing.
+- **What is kept.** The host keeps the exact bytes of every replaced original in its private store
+  (`safeMedia.privateDirectory`), outside public storage, and keeps a record of each operation. The
+  plugin keeps only a small record per optimized image (sizes, preset, operation) in its key-value
+  store, never image bytes. Retained originals use storage; nothing removes them yet.
+- **Restore** (button *Restore* in the report's *Optimized by this plugin* list, or `POST .../restore`)
+  puts back the original that this plugin's optimization replaced, byte for byte: the plugin checks
+  that the host's receipt names the original's SHA-256 digest. It refuses when the image was changed by
+  someone else after the optimization, since restoring would overwrite that change, and it does not
+  restore other callers' replacements. The host's own restore keeps working without the plugin.
+- **Changing the preset or GPS setting** and applying again starts from the original, never from the
+  earlier output. The host offers no way to read a retained original without publishing it, so the
+  plugin first restores the original (fenced like any restore), then re-encodes the restored bytes,
+  checked against the original's digest. If the new output does not save enough, the original stays.
+- **Retries.** Each host operation has an ID derived from the media ID, the source revision, the
+  settings that determine the output, and the processor version, so retrying after a lost response
+  returns the host's earlier receipt instead of changing the image twice. The output waits for the
+  host in a private staging directory (by default under the system temporary directory, one per site;
+  option `stagingDirectory`), so a retry after the site process stopped submits the same bytes. Staged
+  files are removed once the host's outcome is final, and any older than a day are removed on the next
+  apply.
+
+Both routes accept POST only and require the `plugins:manage` permission. One image at a time: there
+are no bulk runs, scheduled optimization or optimization on upload yet.
 
 **Limits of the local processor.** Inputs up to 24 megapixels and 50 MiB; EmDash lets a plugin read at
 most 16 MiB of a file, so larger files are skipped. One encode is killed after 60 seconds. These
@@ -220,7 +282,10 @@ pnpm build       # Build the sandbox bundle with the EmDash plugin CLI, then the
 
 Both editions are wrappers over the shared code in `src/handlers.ts`: `src/plugin.ts` is the sandboxed
 entry and `src/native.ts` the native one, which adds the measured scan and sample (`src/measure.ts`)
-over the local processor (`src/processor/`). The sandboxed entry must not import anything native-only,
+over the local processor (`src/processor/`), and apply and restore (`src/mutations.ts`, with
+`src/staging.ts` and the media host adapter in `packages/media-host-adapter`). The tests in
+`tests/pilot/` run the native edition in the patched host's runtime; they need the pilot checkout
+(`pnpm host:pilot`, or `EMDASH_PILOT_DIR` pointing at one) and are skipped without it. The sandboxed entry must not import anything native-only,
 and the native declarations must match `emdash-plugin.jsonc` apart from the byte-read capability and
 the two native settings; tests check both.
 

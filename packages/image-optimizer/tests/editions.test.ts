@@ -7,7 +7,7 @@ import type { PluginUiContext } from 'emdash/plugin';
 import packageJson from '../package.json';
 import type { ScanRun, StoredResult } from '../src/job.ts';
 import { createPlugin, imageOptimizerPlugin, PLUGIN_ID, PLUGIN_VERSION } from '../src/native.ts';
-import { editions, type Edition } from './editions.ts';
+import { editions, NATIVE_ONLY_ROUTES, type Edition } from './editions.ts';
 import { fakeHost, type FakeMedia } from './fake-host.ts';
 
 const LIBRARY: FakeMedia[] = [
@@ -291,7 +291,8 @@ describe('native declarations', () => {
       const named = (entries: Array<string | { name: string }>) =>
         entries.map((entry) => (typeof entry === 'string' ? entry : entry.name)).sort();
       expect(Object.keys(plugin.hooks).sort()).toEqual(named(manifest.hooks));
-      expect(Object.keys(plugin.routes).sort()).toEqual(named(manifest.routes));
+      // Plus apply and restore, which only the native edition can offer.
+      expect(Object.keys(plugin.routes).sort()).toEqual([...named(manifest.routes), ...NATIVE_ONLY_ROUTES].sort());
       for (const entry of manifest.hooks) {
         if (typeof entry === 'object') expect(plugin.hooks['media:afterUpload']?.errorPolicy).toBe(entry.errorPolicy);
       }
@@ -312,12 +313,23 @@ describe('native declarations', () => {
       format: 'native',
       entrypoint: packageJson.name,
     });
+    // Site options reach `createPlugin()` through the descriptor; none are passed by default.
+    const profile = { runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' };
+    expect(imageOptimizerPlugin({ qualifiedProfiles: [profile] }).options).toEqual({ qualifiedProfiles: [profile] });
   });
 
-  it('are read-only: media and byte reads are the only capabilities and there is no network', () => {
+  it('declare no write capability on published EmDash, and no network', () => {
+    // `media:bytes:replace` is declared only on an EmDash that knows it (the patched host).
     const plugin = createPlugin();
     expect(plugin.capabilities).toEqual(['media:read', 'media:bytes:read']);
     expect(plugin.allowedHosts).toEqual([]);
+  });
+
+  it('add apply and restore routes for POST only, requiring plugins:manage', () => {
+    const { routes } = createPlugin();
+    for (const name of NATIVE_ONLY_ROUTES) {
+      expect(routes[name]).toMatchObject({ methods: ['POST'], permission: 'plugins:manage' });
+    }
   });
 });
 

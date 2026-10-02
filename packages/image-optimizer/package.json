@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "validate": "emdash-plugin validate",
-    "build": "emdash-plugin build && vite build -c vite.native.config.ts && tsc -p tsconfig.native.json && mv dist/types/native.d.ts dist/native.d.ts && rm -r dist/types",
+    "build": "emdash-plugin build && vite build -c vite.native.config.ts && tsc -p tsconfig.native.json && mv dist/types/image-optimizer/src/native.d.ts dist/native.d.ts && rm -r dist/types",
     "dev": "emdash-plugin dev",
     "typecheck": "tsc --noEmit",
     "test": "emdash-plugin validate && vitest run",

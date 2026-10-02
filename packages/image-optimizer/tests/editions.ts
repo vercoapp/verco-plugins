@@ -20,6 +20,9 @@ export interface Edition {
 
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
+/** Routes only the native edition declares. */
+export const NATIVE_ONLY_ROUTES: readonly string[] = ['apply', 'restore'];
+
 function handlerOf(entry: unknown): Handler {
   const handler = typeof entry === 'function' ? entry : (entry as { handler?: unknown } | undefined)?.handler;
   if (typeof handler !== 'function') throw new Error('No such handler');
@@ -57,8 +60,13 @@ const native: Edition = {
   hook: (ctx, name, event) =>
     handlerOf(createPlugin().hooks[name as keyof ReturnType<typeof createPlugin>['hooks']])(event, ctx),
   hookErrorPolicy: (name) => createPlugin().hooks[name as keyof ReturnType<typeof createPlugin>['hooks']]?.errorPolicy,
+  // The shared routes; `apply` and `restore` are the native edition's own (checked in `editions.test.ts`).
   routes: () =>
-    Object.fromEntries(Object.entries(createPlugin().routes).map(([name, route]) => [name, route.methods])),
+    Object.fromEntries(
+      Object.entries(createPlugin().routes)
+        .filter(([name]) => !NATIVE_ONLY_ROUTES.includes(name))
+        .map(([name, route]) => [name, route.methods]),
+    ),
 };
 
 export const editions: Edition[] = [sandboxed, native];
