@@ -1,0 +1,1641 @@
+diff --git a/packages/core/src/database/migrations/092_safe_media_operations.ts b/packages/core/src/database/migrations/092_safe_media_operations.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..43f09fccd56c661fd21cdee4ce016f5898d62b05
+--- /dev/null
++++ b/packages/core/src/database/migrations/092_safe_media_operations.ts
+@@ -0,0 +1,95 @@
++import type { Kysely } from "kysely";
++
++import { columnExists, currentTimestamp } from "../dialect-helpers.js";
++
++/**
++ * Safe media operations: source revisions, retained originals and a durable
++ * operation journal.
++ *
++ * - `media.revision_id` points at the active byte revision. NULL means the row
++ *   has not been managed yet; a baseline revision is created on first use.
++ * - `_emdash_media_revisions` rows describe the bytes of one revision. They are
++ *   never updated except to record a SHA-256 digest once, and are not removed
++ *   with the media row, so readers and recovery keep a complete record.
++ * - `_emdash_media_originals` records byte-exact originals held in private
++ *   storage, addressed by SHA-256.
++ * - `_emdash_media_operations` is the idempotency and recovery journal. No
++ *   foreign keys: records must outlive media deletion and plugin removal.
++ */
++export async function up(db: Kysely<unknown>): Promise<void> {
++	if (!(await columnExists(db, "media", "revision_id"))) {
++		await db.schema.alterTable("media").addColumn("revision_id", "text").execute();
++	}
++
++	await db.schema
++		.createTable("_emdash_media_revisions")
++		.ifNotExists()
++		.addColumn("id", "text", (col) => col.primaryKey())
++		.addColumn("media_id", "text", (col) => col.notNull())
++		.addColumn("kind", "text", (col) => col.notNull())
++		.addColumn("object_key", "text", (col) => col.notNull())
++		.addColumn("mime_type", "text", (col) => col.notNull())
++		.addColumn("size", "integer")
++		.addColumn("width", "integer")
++		.addColumn("height", "integer")
++		.addColumn("content_hash", "text")
++		.addColumn("sha256", "text")
++		.addColumn("created_at", "text", (col) => col.notNull().defaultTo(currentTimestamp(db)))
++		.execute();
++
++	await db.schema
++		.createIndex("idx_media_revisions_media_id")
++		.ifNotExists()
++		.on("_emdash_media_revisions")
++		.column("media_id")
++		.execute();
++
++	await db.schema
++		.createTable("_emdash_media_originals")
++		.ifNotExists()
++		.addColumn("sha256", "text", (col) => col.primaryKey())
++		.addColumn("storage_key", "text", (col) => col.notNull())
++		.addColumn("size", "integer", (col) => col.notNull())
++		.addColumn("mime_type", "text", (col) => col.notNull())
++		.addColumn("created_at", "text", (col) => col.notNull().defaultTo(currentTimestamp(db)))
++		.execute();
++
++	await db.schema
++		.createTable("_emdash_media_operations")
++		.ifNotExists()
++		.addColumn("media_id", "text", (col) => col.notNull())
++		.addColumn("operation_id", "text", (col) => col.notNull())
++		.addColumn("kind", "text", (col) => col.notNull())
++		.addColumn("state", "text", (col) => col.notNull())
++		.addColumn("fingerprint", "text", (col) => col.notNull())
++		.addColumn("expected_revision_id", "text", (col) => col.notNull())
++		.addColumn("candidate_sha256", "text", (col) => col.notNull())
++		.addColumn("candidate_revision_id", "text")
++		.addColumn("original_sha256", "text")
++		.addColumn("receipt", "text")
++		.addColumn("error_code", "text")
++		.addColumn("created_by", "text")
++		.addColumn("created_at", "text", (col) => col.notNull().defaultTo(currentTimestamp(db)))
++		.addColumn("updated_at", "text", (col) => col.notNull().defaultTo(currentTimestamp(db)))
++		.addColumn("completed_at", "text")
++		.addPrimaryKeyConstraint("pk_media_operations", ["media_id", "operation_id"])
++		.execute();
++
++	await db.schema
++		.createIndex("idx_media_operations_state")
++		.ifNotExists()
++		.on("_emdash_media_operations")
++		.columns(["state", "updated_at"])
++		.execute();
++}
++
++export async function down(db: Kysely<unknown>): Promise<void> {
++	await db.schema.dropIndex("idx_media_operations_state").ifExists().execute();
++	await db.schema.dropTable("_emdash_media_operations").ifExists().execute();
++	await db.schema.dropTable("_emdash_media_originals").ifExists().execute();
++	await db.schema.dropIndex("idx_media_revisions_media_id").ifExists().execute();
++	await db.schema.dropTable("_emdash_media_revisions").ifExists().execute();
++	if (await columnExists(db, "media", "revision_id")) {
++		await db.schema.alterTable("media").dropColumn("revision_id").execute();
++	}
++}
+diff --git a/packages/core/src/database/migrations/runner.ts b/packages/core/src/database/migrations/runner.ts
+index 252ce5d8fb5b683ba8c71d09cd27e51593ff0eac..64ae365ca5b0647bd6410a6dc0127d3f04290a90 100644
+--- a/packages/core/src/database/migrations/runner.ts
++++ b/packages/core/src/database/migrations/runner.ts
+@@ -99,6 +99,7 @@ import * as m088 from "./088_cron_oneshot_utc.js";
+ import * as m089 from "./089_auto_seed_completion.js";
+ import * as m090 from "./090_redirect_enable_loop_guard.js";
+ import * as m091 from "./091_redirect_artifacts.js";
++import * as m092 from "./092_safe_media_operations.js";
+ 
+ const MIGRATIONS: Readonly<Record<string, Migration>> = Object.freeze({
+ 	"001_initial": m001,
+@@ -191,6 +192,7 @@ const MIGRATIONS: Readonly<Record<string, Migration>> = Object.freeze({
+ 	"089_auto_seed_completion": m089,
+ 	"090_redirect_enable_loop_guard": m090,
+ 	"091_redirect_artifacts": m091,
++	"092_safe_media_operations": m092,
+ });
+ 
+ /** Ordered names from the statically registered migration set. */
+diff --git a/packages/core/src/database/repositories/media-operations.ts b/packages/core/src/database/repositories/media-operations.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9951430919ee8c9aea06bca85f4898f342a27d03
+--- /dev/null
++++ b/packages/core/src/database/repositories/media-operations.ts
+@@ -0,0 +1,328 @@
++import type { Kysely, Selectable } from "kysely";
++import { ulid } from "ulidx";
++
++import { sha256Hex } from "../../media/safe/digest.js";
++import { isSha256Hex } from "../../media/safe/original-keys.js";
++import type {
++	Database,
++	MediaOperationTable,
++	MediaOriginalTable,
++	MediaRevisionTable,
++} from "../types.js";
++
++export type MediaRevision = Selectable<MediaRevisionTable>;
++export type MediaOriginal = Selectable<MediaOriginalTable>;
++export type MediaOperation = Selectable<MediaOperationTable>;
++
++export type MediaOperationKind = "replace" | "restore";
++
++/**
++ * Journal states. `published` is deliberately absent from the transitions this
++ * repository offers: publication must move the media pointer and the journal
++ * together and is added with the fenced publication step.
++ */
++export const OPEN_OPERATION_STATES = ["intent", "candidate_staged", "original_retained"] as const;
++export type OpenMediaOperationState = (typeof OPEN_OPERATION_STATES)[number];
++export type MediaOperationState = OpenMediaOperationState | "published" | "rejected" | "aborted";
++
++const NEXT_STATE: Readonly<Record<OpenMediaOperationState, MediaOperationState | undefined>> = {
++	intent: "candidate_staged",
++	candidate_staged: "original_retained",
++	original_retained: undefined,
++};
++
++export interface BeginOperationInput {
++	mediaId: string;
++	operationId: string;
++	kind: MediaOperationKind;
++	expectedRevisionId: string;
++	candidateSha256: string;
++	createdBy?: string;
++}
++
++export type BeginOperationResult =
++	| { status: "created" | "existing"; operation: MediaOperation }
++	| { status: "conflict" };
++
++/** Canonical identity of an operation request; the same ID may only repeat the same request. */
++export async function operationFingerprint(
++	input: Pick<BeginOperationInput, "kind" | "mediaId" | "expectedRevisionId" | "candidateSha256">,
++): Promise<string> {
++	return sha256Hex(
++		new TextEncoder().encode(
++			JSON.stringify([input.kind, input.mediaId, input.expectedRevisionId, input.candidateSha256]),
++		),
++	);
++}
++
++export function isOpenOperation(operation: Pick<MediaOperation, "state">): boolean {
++	return (OPEN_OPERATION_STATES as readonly string[]).includes(operation.state);
++}
++
++function changed(result: { numUpdatedRows: bigint }): boolean {
++	return result.numUpdatedRows > 0n;
++}
++
++/**
++ * Persistence for source revisions, retained-original records and the
++ * operation journal. It holds no storage handles and performs no I/O beyond
++ * the database; callers order storage work around these records.
++ */
++export class MediaOperationsRepository {
++	constructor(private readonly db: Kysely<Database>) {}
++
++	// --- Revisions ---------------------------------------------------------
++
++	async getRevision(id: string): Promise<MediaRevision | null> {
++		return (
++			(await this.db
++				.selectFrom("_emdash_media_revisions")
++				.selectAll()
++				.where("id", "=", id)
++				.executeTakeFirst()) ?? null
++		);
++	}
++
++	/**
++	 * The active revision of a ready media item, creating a baseline revision
++	 * for rows that have never been managed. Safe to race: exactly one baseline
++	 * wins and losers discard theirs.
++	 */
++	async ensureActiveRevision(mediaId: string): Promise<MediaRevision | null> {
++		const media = await this.db
++			.selectFrom("media")
++			.select([
++				"id",
++				"status",
++				"storage_key",
++				"mime_type",
++				"size",
++				"width",
++				"height",
++				"content_hash",
++				"revision_id",
++			])
++			.where("id", "=", mediaId)
++			.executeTakeFirst();
++		if (!media || media.status !== "ready") return null;
++
++		if (media.revision_id) {
++			const active = await this.getRevision(media.revision_id);
++			if (!active) throw new Error(`Media ${mediaId} points at a missing revision`);
++			return active;
++		}
++
++		const baseline = {
++			id: ulid(),
++			media_id: media.id,
++			kind: "baseline",
++			object_key: media.storage_key,
++			mime_type: media.mime_type,
++			size: media.size,
++			width: media.width,
++			height: media.height,
++			content_hash: media.content_hash,
++			sha256: null,
++		};
++		await this.db.insertInto("_emdash_media_revisions").values(baseline).execute();
++		const claimed = await this.db
++			.updateTable("media")
++			.set({ revision_id: baseline.id })
++			.where("id", "=", mediaId)
++			.where("revision_id", "is", null)
++			.executeTakeFirst();
++		if (changed(claimed)) return (await this.getRevision(baseline.id)) ?? null;
++
++		await this.db.deleteFrom("_emdash_media_revisions").where("id", "=", baseline.id).execute();
++		const winner = await this.db
++			.selectFrom("media")
++			.select("revision_id")
++			.where("id", "=", mediaId)
++			.executeTakeFirst();
++		return winner?.revision_id ? this.getRevision(winner.revision_id) : null;
++	}
++
++	/** Record a revision's SHA-256 once. A different digest already recorded is an error. */
++	async recordRevisionDigest(revisionId: string, sha256: string): Promise<void> {
++		if (!isSha256Hex(sha256)) throw new TypeError("Expected a lowercase hex SHA-256 digest");
++		await this.db
++			.updateTable("_emdash_media_revisions")
++			.set({ sha256 })
++			.where("id", "=", revisionId)
++			.where("sha256", "is", null)
++			.execute();
++		const revision = await this.getRevision(revisionId);
++		if (!revision) throw new Error(`Revision ${revisionId} does not exist`);
++		if (revision.sha256 !== sha256) {
++			throw new Error(`Revision ${revisionId} already records a different digest`);
++		}
++	}
++
++	// --- Retained originals ------------------------------------------------
++
++	async getOriginal(sha256: string): Promise<MediaOriginal | null> {
++		return (
++			(await this.db
++				.selectFrom("_emdash_media_originals")
++				.selectAll()
++				.where("sha256", "=", sha256)
++				.executeTakeFirst()) ?? null
++		);
++	}
++
++	/** Record an original after its private copy is verified. Repeating is a no-op, never a second backup. */
++	async recordOriginal(input: {
++		sha256: string;
++		storageKey: string;
++		size: number;
++		mimeType: string;
++	}): Promise<{ created: boolean; original: MediaOriginal }> {
++		if (!isSha256Hex(input.sha256)) throw new TypeError("Expected a lowercase hex SHA-256 digest");
++		const result = await this.db
++			.insertInto("_emdash_media_originals")
++			.values({
++				sha256: input.sha256,
++				storage_key: input.storageKey,
++				size: input.size,
++				mime_type: input.mimeType,
++			})
++			.onConflict((conflict) => conflict.column("sha256").doNothing())
++			.executeTakeFirst();
++		const original = await this.getOriginal(input.sha256);
++		if (!original) throw new Error("Original record was not persisted");
++		return { created: (result.numInsertedOrUpdatedRows ?? 0n) > 0n, original };
++	}
++
++	async backupTotals(): Promise<{ count: number; bytes: number }> {
++		const row = await this.db
++			.selectFrom("_emdash_media_originals")
++			.select((eb) => [
++				eb.fn.countAll<number>().as("count"),
++				eb.fn.coalesce(eb.fn.sum<number>("size"), eb.val(0)).as("bytes"),
++			])
++			.executeTakeFirstOrThrow();
++		return { count: Number(row.count), bytes: Number(row.bytes) };
++	}
++
++	// --- Operation journal -------------------------------------------------
++
++	async getOperation(mediaId: string, operationId: string): Promise<MediaOperation | null> {
++		return (
++			(await this.db
++				.selectFrom("_emdash_media_operations")
++				.selectAll()
++				.where("media_id", "=", mediaId)
++				.where("operation_id", "=", operationId)
++				.executeTakeFirst()) ?? null
++		);
++	}
++
++	/**
++	 * Record intent, or return the existing operation for a repeated identical
++	 * request. Reusing an ID with a different request is a conflict, including
++	 * after the media item has been deleted.
++	 */
++	async beginOperation(input: BeginOperationInput): Promise<BeginOperationResult> {
++		if (!isSha256Hex(input.candidateSha256)) {
++			throw new TypeError("Expected a lowercase hex SHA-256 digest");
++		}
++		const fingerprint = await operationFingerprint(input);
++		const now = new Date().toISOString();
++		const inserted = await this.db
++			.insertInto("_emdash_media_operations")
++			.values({
++				media_id: input.mediaId,
++				operation_id: input.operationId,
++				kind: input.kind,
++				state: "intent",
++				fingerprint,
++				expected_revision_id: input.expectedRevisionId,
++				candidate_sha256: input.candidateSha256,
++				candidate_revision_id: null,
++				original_sha256: null,
++				receipt: null,
++				error_code: null,
++				created_by: input.createdBy ?? null,
++				created_at: now,
++				updated_at: now,
++				completed_at: null,
++			})
++			.onConflict((conflict) => conflict.columns(["media_id", "operation_id"]).doNothing())
++			.executeTakeFirst();
++		const operation = await this.getOperation(input.mediaId, input.operationId);
++		if (!operation) throw new Error("Operation record was not persisted");
++		if ((inserted.numInsertedOrUpdatedRows ?? 0n) > 0n) return { status: "created", operation };
++		return operation.fingerprint === fingerprint
++			? { status: "existing", operation }
++			: { status: "conflict" };
++	}
++
++	/**
++	 * Move an open operation to its next state if it is still in `from`.
++	 * Returns null when another worker already advanced or finished it.
++	 */
++	async advanceOperation(
++		mediaId: string,
++		operationId: string,
++		from: OpenMediaOperationState,
++		fields: { candidateRevisionId?: string; originalSha256?: string | null } = {},
++	): Promise<MediaOperation | null> {
++		const next = NEXT_STATE[from];
++		if (!next) throw new Error(`An operation in ${from} advances only by publication`);
++		const row = await this.db
++			.updateTable("_emdash_media_operations")
++			.set({
++				state: next,
++				updated_at: new Date().toISOString(),
++				...(fields.candidateRevisionId === undefined
++					? {}
++					: { candidate_revision_id: fields.candidateRevisionId }),
++				...(fields.originalSha256 === undefined ? {} : { original_sha256: fields.originalSha256 }),
++			})
++			.where("media_id", "=", mediaId)
++			.where("operation_id", "=", operationId)
++			.where("state", "=", from)
++			.returningAll()
++			.executeTakeFirst();
++		return row ?? null;
++	}
++
++	/** Durably end an open operation without publishing. Terminal states are never overwritten. */
++	async finishOperation(
++		mediaId: string,
++		operationId: string,
++		outcome: { state: "rejected" | "aborted"; errorCode: string },
++	): Promise<MediaOperation | null> {
++		const now = new Date().toISOString();
++		const receipt = JSON.stringify({
++			status: "rejected",
++			code: outcome.errorCode,
++			operationId,
++		});
++		const row = await this.db
++			.updateTable("_emdash_media_operations")
++			.set({
++				state: outcome.state,
++				error_code: outcome.errorCode,
++				receipt,
++				updated_at: now,
++				completed_at: now,
++			})
++			.where("media_id", "=", mediaId)
++			.where("operation_id", "=", operationId)
++			.where("state", "in", [...OPEN_OPERATION_STATES])
++			.returningAll()
++			.executeTakeFirst();
++		return row ?? null;
++	}
++
++	async listOpenOperations(limit = 100): Promise<MediaOperation[]> {
++		return this.db
++			.selectFrom("_emdash_media_operations")
++			.selectAll()
++			.where("state", "in", [...OPEN_OPERATION_STATES])
++			.orderBy("created_at")
++			.limit(limit)
++			.execute();
++	}
++}
+diff --git a/packages/core/src/database/types.ts b/packages/core/src/database/types.ts
+index cdbabe910a87d12eab47933b8f5fb16ff6db3aa7..207cae51a5899835faca127b32086b9a74015a51 100644
+--- a/packages/core/src/database/types.ts
++++ b/packages/core/src/database/types.ts
+@@ -93,6 +93,52 @@ export interface MediaTable {
+ 	created_at: Generated<string>;
+ 	author_id: string | null;
+ 	folder_id: Generated<string | null>;
++	/** Active byte revision; NULL until first managed by the safe media operations. */
++	revision_id: string | null;
++}
++
++/** Immutable description of one revision's bytes. Only `sha256` may be set, once, when NULL. */
++export interface MediaRevisionTable {
++	id: string;
++	// No foreign key: revisions outlive media deletion.
++	media_id: string;
++	kind: string; // 'baseline' | 'replace' | 'restore'
++	object_key: string;
++	mime_type: string;
++	size: number | null;
++	width: number | null;
++	height: number | null;
++	content_hash: string | null;
++	sha256: string | null;
++	created_at: Generated<string>;
++}
++
++/** Byte-exact original retained in private storage, addressed by SHA-256. */
++export interface MediaOriginalTable {
++	sha256: string;
++	storage_key: string;
++	size: number;
++	mime_type: string;
++	created_at: Generated<string>;
++}
++
++/** Idempotency and recovery journal; survives media deletion and plugin removal. */
++export interface MediaOperationTable {
++	media_id: string;
++	operation_id: string;
++	kind: string; // 'replace' | 'restore'
++	state: string;
++	fingerprint: string;
++	expected_revision_id: string;
++	candidate_sha256: string;
++	candidate_revision_id: string | null;
++	original_sha256: string | null;
++	receipt: string | null;
++	error_code: string | null;
++	created_by: string | null;
++	created_at: Generated<string>;
++	updated_at: Generated<string>;
++	completed_at: string | null;
+ }
+ 
+ export interface MediaFolderTable {
+@@ -765,6 +811,9 @@ export interface Database {
+ 	_emdash_taxonomy_def_groups: TaxonomyDefGroupTable;
+ 	media: MediaTable;
+ 	media_folders: MediaFolderTable;
++	_emdash_media_revisions: MediaRevisionTable;
++	_emdash_media_originals: MediaOriginalTable;
++	_emdash_media_operations: MediaOperationTable;
+ 	_emdash_media_upload_attempts: MediaUploadAttemptTable;
+ 	_emdash_media_usage_sources: MediaUsageSourceTable;
+ 	_emdash_media_usage: MediaUsageTable;
+diff --git a/packages/core/src/media/safe/digest.ts b/packages/core/src/media/safe/digest.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9ce7fcf48c174c2fc5c0bd39284e261c536e867
+--- /dev/null
++++ b/packages/core/src/media/safe/digest.ts
+@@ -0,0 +1,9 @@
++/** Lowercase hex SHA-256 of `bytes`, using WebCrypto (available on Node and workerd). */
++export async function sha256Hex(bytes: Uint8Array | ArrayBuffer): Promise<string> {
++	const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
++	// Copy into a plain ArrayBuffer: a view may sit on a SharedArrayBuffer, which digest() rejects.
++	const copy = new Uint8Array(view.byteLength);
++	copy.set(view);
++	const digest = await crypto.subtle.digest("SHA-256", copy);
++	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
++}
+diff --git a/packages/core/src/media/safe/original-keys.ts b/packages/core/src/media/safe/original-keys.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..34a8ea4f7b91186dc0229101b31e4fcce43b70ca
+--- /dev/null
++++ b/packages/core/src/media/safe/original-keys.ts
+@@ -0,0 +1,24 @@
++/**
++ * Storage layout for retained originals.
++ *
++ * Originals are addressed by the SHA-256 of their bytes under a reserved
++ * prefix. They live in private storage that is never mounted publicly, and the
++ * public media route also refuses this prefix (see
++ * {@link PRIVATE_STORAGE_PREFIXES}) so that a misconfiguration which places
++ * them in the active bucket still cannot serve them.
++ */
++
++export const MEDIA_ORIGINALS_PREFIX = "media-originals/";
++
++const SHA256_HEX = /^[0-9a-f]{64}$/;
++
++export function isSha256Hex(value: string): boolean {
++	return SHA256_HEX.test(value);
++}
++
++export function originalStorageKey(sha256: string): string {
++	if (!isSha256Hex(sha256)) {
++		throw new TypeError("An original is addressed by a lowercase hex SHA-256 digest");
++	}
++	return `${MEDIA_ORIGINALS_PREFIX}${sha256}`;
++}
+diff --git a/packages/core/src/media/safe/private-local.ts b/packages/core/src/media/safe/private-local.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2064bf304579502d5e1965c8e11b35e1bf9fd9d2
+--- /dev/null
++++ b/packages/core/src/media/safe/private-local.ts
+@@ -0,0 +1,171 @@
++/**
++ * Local-filesystem private storage for retained originals (Node only).
++ *
++ * The first qualified profile keeps originals in a directory that is neither
++ * the active storage directory, nor inside or above it, nor under the Astro
++ * public directory, so no static or storage-adapter route can reach it.
++ * Writes go to a temporary name, are flushed, and are renamed into place with
++ * the parent directory flushed, so a final name never holds a partial object.
++ */
++
++import { createReadStream, realpathSync } from "node:fs";
++import * as fs from "node:fs/promises";
++import * as path from "node:path";
++import { Readable } from "node:stream";
++
++import type { ListOptions, ListResult, Storage, UploadResult } from "../../storage/types.js";
++import { EmDashStorageError } from "../../storage/types.js";
++
++export class PrivateStorageConfigError extends Error {
++	constructor(message: string) {
++		super(message);
++		this.name = "PrivateStorageConfigError";
++	}
++}
++
++export interface LocalPrivateStorageOptions {
++	/** Directory that will hold retained originals. */
++	directory: string;
++	/** Directories that are publicly reachable or hold public media: the active storage and Astro `public`. */
++	publicDirectories: readonly string[];
++}
++
++/** Resolve through symlinks for the deepest existing ancestor, then append the rest. */
++function resolveReal(target: string): string {
++	let existing = path.resolve(target);
++	const rest: string[] = [];
++	for (;;) {
++		try {
++			return path.join(realpathSync(existing), ...rest.toReversed());
++		} catch {
++			const parent = path.dirname(existing);
++			if (parent === existing) return path.resolve(target);
++			rest.push(path.basename(existing));
++			existing = parent;
++		}
++	}
++}
++
++function contains(parent: string, child: string): boolean {
++	const relative = path.relative(parent, child);
++	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
++}
++
++const TEMPORARY_SUFFIX = ".tmp";
++
++class DurableLocalStorage implements Storage {
++	constructor(private readonly directory: string) {}
++
++	private filePath(key: string): string {
++		const resolved = path.resolve(this.directory, key);
++		if (
++			key.length === 0 ||
++			key.includes("\0") ||
++			path.isAbsolute(key) ||
++			!resolved.startsWith(this.directory + path.sep)
++		) {
++			throw new EmDashStorageError("Invalid file path", "INVALID_PATH");
++		}
++		return resolved;
++	}
++
++	async upload(options: {
++		key: string;
++		body: Buffer | Uint8Array | ReadableStream<Uint8Array>;
++	}): Promise<UploadResult> {
++		const target = this.filePath(options.key);
++		const bytes =
++			options.body instanceof ReadableStream
++				? new Uint8Array(await new Response(options.body).arrayBuffer())
++				: options.body;
++		const temporary = `${target}.${crypto.randomUUID()}${TEMPORARY_SUFFIX}`;
++		try {
++			await fs.mkdir(path.dirname(target), { recursive: true });
++			const handle = await fs.open(temporary, "wx", 0o600);
++			try {
++				await handle.writeFile(bytes);
++				await handle.sync();
++			} finally {
++				await handle.close();
++			}
++			await fs.rename(temporary, target);
++			const parent = await fs.open(path.dirname(target), "r");
++			try {
++				await parent.sync();
++			} finally {
++				await parent.close();
++			}
++		} catch (error) {
++			await fs.rm(temporary, { force: true });
++			throw new EmDashStorageError(`Failed to upload file: ${options.key}`, "UPLOAD_FAILED", error);
++		}
++		return { key: options.key, url: "", size: bytes.byteLength };
++	}
++
++	async download(key: string) {
++		const target = this.filePath(key);
++		let size: number;
++		try {
++			size = (await fs.stat(target)).size;
++		} catch {
++			throw new EmDashStorageError(`File not found: ${key}`, "NOT_FOUND");
++		}
++		// eslint-disable-next-line typescript/no-unsafe-type-assertion -- Readable.toWeb returns ReadableStream<unknown>; file streams yield Uint8Array chunks
++		const body = Readable.toWeb(createReadStream(target)) as ReadableStream<Uint8Array>;
++		return { body, contentType: "application/octet-stream", size };
++	}
++
++	async delete(key: string): Promise<void> {
++		await fs.rm(this.filePath(key), { force: true });
++	}
++
++	async exists(key: string): Promise<boolean> {
++		return fs.access(this.filePath(key)).then(
++			() => true,
++			() => false,
++		);
++	}
++
++	async list(options: ListOptions = {}): Promise<ListResult> {
++		const files: ListResult["files"] = [];
++		const walk = async (directory: string): Promise<void> => {
++			for (const entry of await fs.readdir(directory, { withFileTypes: true }).catch(() => [])) {
++				const full = path.join(directory, entry.name);
++				if (entry.isDirectory()) await walk(full);
++				else if (!entry.name.endsWith(TEMPORARY_SUFFIX)) {
++					const key = path.relative(this.directory, full).split(path.sep).join("/");
++					if (key.startsWith(options.prefix ?? "")) {
++						const stat = await fs.stat(full);
++						files.push({ key, size: stat.size, lastModified: stat.mtime });
++					}
++				}
++			}
++		};
++		await walk(this.directory);
++		return { files: files.toSorted((a, b) => a.key.localeCompare(b.key)).slice(0, options.limit) };
++	}
++
++	getSignedUploadUrl(): never {
++		throw new EmDashStorageError("Private original storage has no signed URLs", "NOT_SUPPORTED");
++	}
++
++	getPublicUrl(): never {
++		throw new EmDashStorageError("Private original storage has no public URLs", "NOT_SUPPORTED");
++	}
++}
++
++export function createLocalPrivateStorage(options: LocalPrivateStorageOptions): Storage {
++	if (!options.directory) {
++		throw new PrivateStorageConfigError("A private original directory is required");
++	}
++	const directory = resolveReal(options.directory);
++	for (const publicDirectory of options.publicDirectories) {
++		const resolved = resolveReal(publicDirectory);
++		if (contains(resolved, directory) || contains(directory, resolved)) {
++			throw new PrivateStorageConfigError(
++				"The private original directory must be separate from every public directory",
++			);
++		}
++	}
++	return new DurableLocalStorage(directory);
++}
+diff --git a/packages/core/src/media/safe/private-originals.ts b/packages/core/src/media/safe/private-originals.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a015516c0dfe76dcb8ee527226a68880099f64bc
+--- /dev/null
++++ b/packages/core/src/media/safe/private-originals.ts
+@@ -0,0 +1,114 @@
++/**
++ * Private, digest-addressed storage for byte-exact original images.
++ *
++ * Retention is verified: bytes are written, read back and compared with their
++ * SHA-256 before the caller may record the original as retained. A stored
++ * object that fails verification is never reported as retained.
++ */
++
++import type { Storage } from "../../storage/types.js";
++import { sha256Hex } from "./digest.js";
++import { originalStorageKey } from "./original-keys.js";
++
++export type PrivateOriginalErrorCode =
++	| "ORIGINAL_NOT_FOUND"
++	| "ORIGINAL_VERIFY_FAILED"
++	| "ORIGINAL_STORAGE_ERROR";
++
++export class PrivateOriginalError extends Error {
++	constructor(
++		readonly code: PrivateOriginalErrorCode,
++		message: string,
++		options?: { cause?: unknown },
++	) {
++		super(message, options);
++		this.name = "PrivateOriginalError";
++	}
++}
++
++export interface RetainedOriginal {
++	sha256: string;
++	storageKey: string;
++	size: number;
++	/** False when an identical verified original was already retained. */
++	created: boolean;
++}
++
++export interface PrivateOriginalStore {
++	/** Durably retain `bytes` and return only once the stored copy matches its digest. */
++	retain(bytes: Uint8Array, mimeType: string): Promise<RetainedOriginal>;
++	/** Read an original and verify it against `sha256`. */
++	read(sha256: string): Promise<Uint8Array>;
++	exists(sha256: string): Promise<boolean>;
++}
++
++function isNotFound(error: unknown): boolean {
++	if (!(error instanceof Error)) return false;
++	const code = Reflect.get(error, "code");
++	return (
++		code === "NOT_FOUND" ||
++		error.message.includes("not found") ||
++		error.message.includes("NOT_FOUND")
++	);
++}
++
++async function readAll(storage: Storage, key: string): Promise<Uint8Array | null> {
++	try {
++		const result = await storage.download(key);
++		return new Uint8Array(await new Response(result.body).arrayBuffer());
++	} catch (error) {
++		if (isNotFound(error)) return null;
++		throw new PrivateOriginalError("ORIGINAL_STORAGE_ERROR", "Original storage could not be read", {
++			cause: error,
++		});
++	}
++}
++
++export function createPrivateOriginalStore(storage: Storage): PrivateOriginalStore {
++	return {
++		async retain(bytes, mimeType) {
++			const sha256 = await sha256Hex(bytes);
++			const storageKey = originalStorageKey(sha256);
++
++			const existing = await readAll(storage, storageKey);
++			if (existing && (await sha256Hex(existing)) === sha256) {
++				return { sha256, storageKey, size: existing.byteLength, created: false };
++			}
++
++			try {
++				// A missing or corrupt object under this digest is replaced: the key is content-addressed.
++				await storage.upload({ key: storageKey, body: bytes, contentType: mimeType });
++			} catch (error) {
++				throw new PrivateOriginalError("ORIGINAL_STORAGE_ERROR", "Original could not be written", {
++					cause: error,
++				});
++			}
++
++			const stored = await readAll(storage, storageKey);
++			if (!stored || (await sha256Hex(stored)) !== sha256) {
++				await storage.delete(storageKey).catch(() => undefined);
++				throw new PrivateOriginalError(
++					"ORIGINAL_VERIFY_FAILED",
++					"The stored original does not match its digest",
++				);
++			}
++			return { sha256, storageKey, size: stored.byteLength, created: true };
++		},
++
++		async read(sha256) {
++			const bytes = await readAll(storage, originalStorageKey(sha256));
++			if (!bytes) throw new PrivateOriginalError("ORIGINAL_NOT_FOUND", "Original is not retained");
++			if ((await sha256Hex(bytes)) !== sha256) {
++				throw new PrivateOriginalError(
++					"ORIGINAL_VERIFY_FAILED",
++					"The stored original does not match its digest",
++				);
++			}
++			return bytes;
++		},
++
++		async exists(sha256) {
++			return storage.exists(originalStorageKey(sha256));
++		},
++	};
++}
+diff --git a/packages/core/src/transfer/staging/keys.ts b/packages/core/src/transfer/staging/keys.ts
+index 5ce8d440486b68eaa5ad3e2d8fb04dd150ecd397..ca755419d450fa573a67933eeba408a94ef7eaa6 100644
+--- a/packages/core/src/transfer/staging/keys.ts
++++ b/packages/core/src/transfer/staging/keys.ts
+@@ -12,6 +12,7 @@
+  * refuse every key under `transfers/` ({@link isTransferStorageKey}).
+  */
+ 
++import { MEDIA_ORIGINALS_PREFIX } from "../../media/safe/original-keys.js";
+ import { TransferError } from "../errors.js";
+ import { isPackagePath } from "../format/paths.js";
+ import type { TransferOperationKind } from "../ops/states.js";
+@@ -71,6 +72,7 @@ export function normalizeStorageKeyForGuard(key: string): string | null {
+ export const PRIVATE_STORAGE_PREFIXES: readonly string[] = Object.freeze([
+ 	"backups/",
+ 	TRANSFER_STORAGE_PREFIX,
++	MEDIA_ORIGINALS_PREFIX,
+ ]);
+ 
+ /**
+diff --git a/packages/core/tests/unit/database/migrations/092_safe_media_operations.test.ts b/packages/core/tests/unit/database/migrations/092_safe_media_operations.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2447accaeceda4fb3d534e1f44584256c2249726
+--- /dev/null
++++ b/packages/core/tests/unit/database/migrations/092_safe_media_operations.test.ts
+@@ -0,0 +1,122 @@
++import type { Kysely } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { down, up } from "../../../../src/database/migrations/092_safe_media_operations.js";
++import type { Database } from "../../../../src/database/types.js";
++import { setupTestDatabase, teardownTestDatabase } from "../../../utils/test-db.js";
++
++async function tables(db: Kysely<Database>): Promise<string[]> {
++	const result = await db.introspection.getTables();
++	return result.map((table) => table.name);
++}
++
++describe("092_safe_media_operations migration", () => {
++	let db: Kysely<Database>;
++
++	beforeEach(async () => {
++		db = await setupTestDatabase();
++	});
++
++	afterEach(async () => {
++		await teardownTestDatabase(db);
++	});
++
++	it("creates the revision, original and operation tables and the media pointer", async () => {
++		const names = await tables(db);
++		expect(names).toEqual(
++			expect.arrayContaining([
++				"_emdash_media_revisions",
++				"_emdash_media_originals",
++				"_emdash_media_operations",
++			]),
++		);
++		const media = (await db.introspection.getTables()).find((table) => table.name === "media");
++		expect(media?.columns.map((column) => column.name)).toContain("revision_id");
++	});
++
++	it("leaves existing media unmanaged and is safe to run twice", async () => {
++		await down(db as Kysely<unknown>);
++		await db
++			.insertInto("media")
++			.values({
++				id: "legacy",
++				filename: "legacy.png",
++				mime_type: "image/png",
++				size: 10,
++				width: 1,
++				height: 1,
++				alt: "Alt",
++				caption: null,
++				storage_key: "legacy.png",
++				status: "ready",
++				content_hash: null,
++				blurhash: null,
++				dominant_color: null,
++				author_id: null,
++				focal_x: null,
++				focal_y: null,
++			} as never)
++			.execute();
++
++		await up(db as Kysely<unknown>);
++		await up(db as Kysely<unknown>);
++
++		const row = await db
++			.selectFrom("media")
++			.select(["id", "alt", "revision_id"])
++			.where("id", "=", "legacy")
++			.executeTakeFirstOrThrow();
++		expect(row).toEqual({ id: "legacy", alt: "Alt", revision_id: null });
++		expect(await db.selectFrom("_emdash_media_revisions").select("id").execute()).toEqual([]);
++	});
++
++	it("keeps operation records without depending on the media row", async () => {
++		await db
++			.insertInto("_emdash_media_operations")
++			.values({
++				media_id: "gone",
++				operation_id: "op",
++				kind: "replace",
++				state: "intent",
++				fingerprint: "f",
++				expected_revision_id: "r",
++				candidate_sha256: "c".repeat(64),
++				candidate_revision_id: null,
++				original_sha256: null,
++				receipt: null,
++				error_code: null,
++				created_by: null,
++				completed_at: null,
++			})
++			.execute();
++		await expect(
++			db
++				.insertInto("_emdash_media_operations")
++				.values({
++					media_id: "gone",
++					operation_id: "op",
++					kind: "replace",
++					state: "intent",
++					fingerprint: "f",
++					expected_revision_id: "r",
++					candidate_sha256: "c".repeat(64),
++					candidate_revision_id: null,
++					original_sha256: null,
++					receipt: null,
++					error_code: null,
++					created_by: null,
++					completed_at: null,
++				})
++				.execute(),
++		).rejects.toThrow();
++	});
++
++	it("down removes only what up added", async () => {
++		await down(db as Kysely<unknown>);
++		const names = await tables(db);
++		expect(names).not.toContain("_emdash_media_operations");
++		expect(names).toContain("media");
++		const media = (await db.introspection.getTables()).find((table) => table.name === "media");
++		expect(media?.columns.map((column) => column.name)).not.toContain("revision_id");
++	});
++});
+diff --git a/packages/core/tests/unit/media/safe/media-operations-repository.test.ts b/packages/core/tests/unit/media/safe/media-operations-repository.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4d43ca5de500954b38fe294a17b8aba538a3179
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/media-operations-repository.test.ts
+@@ -0,0 +1,328 @@
++import { mkdtemp, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Kysely, SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { runMigrations } from "../../../../src/database/migrations/runner.js";
++import {
++	MediaOperationsRepository,
++	operationFingerprint,
++} from "../../../../src/database/repositories/media-operations.js";
++import { MediaRepository } from "../../../../src/database/repositories/media.js";
++import type { Database } from "../../../../src/database/types.js";
++import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
++import { setupTestDatabase, teardownTestDatabase } from "../../../utils/test-db.js";
++
++const DIGEST_A = "a".repeat(64);
++const DIGEST_B = "b".repeat(64);
++
++async function readyMedia(db: Kysely<Database>, storageKey = "photo.png") {
++	const media = new MediaRepository(db);
++	const created = await media.create({
++		filename: storageKey,
++		mimeType: "image/png",
++		size: 120,
++		width: 16,
++		height: 16,
++		storageKey,
++		contentHash: "sha1:legacy",
++		status: "ready",
++	});
++	return created;
++}
++
++describe("MediaOperationsRepository revisions", () => {
++	let db: Kysely<Database>;
++	let repo: MediaOperationsRepository;
++
++	beforeEach(async () => {
++		db = await setupTestDatabase();
++		repo = new MediaOperationsRepository(db);
++	});
++
++	afterEach(async () => {
++		await teardownTestDatabase(db);
++	});
++
++	it("creates a baseline revision from the current row and keeps it stable", async () => {
++		const media = await readyMedia(db);
++		const first = await repo.ensureActiveRevision(media.id);
++		expect(first).toMatchObject({
++			media_id: media.id,
++			kind: "baseline",
++			object_key: "photo.png",
++			mime_type: "image/png",
++			size: 120,
++			width: 16,
++			height: 16,
++			content_hash: "sha1:legacy",
++			sha256: null,
++		});
++		const again = await repo.ensureActiveRevision(media.id);
++		expect(again?.id).toBe(first?.id);
++		const row = await db
++			.selectFrom("media")
++			.select("revision_id")
++			.where("id", "=", media.id)
++			.executeTakeFirst();
++		expect(row?.revision_id).toBe(first?.id);
++	});
++
++	it("returns null for missing and not-ready media and writes nothing", async () => {
++		const media = new MediaRepository(db);
++		const pending = await media.createPending({
++			filename: "p.png",
++			mimeType: "image/png",
++			storageKey: "p.png",
++		});
++		expect(await repo.ensureActiveRevision("missing")).toBeNull();
++		expect(await repo.ensureActiveRevision(pending.id)).toBeNull();
++		expect(await db.selectFrom("_emdash_media_revisions").select("id").execute()).toEqual([]);
++	});
++
++	it("creates exactly one baseline when callers race", async () => {
++		const media = await readyMedia(db);
++		const results = await Promise.all(
++			Array.from({ length: 8 }, () => repo.ensureActiveRevision(media.id)),
++		);
++		expect(new Set(results.map((revision) => revision?.id)).size).toBe(1);
++		const rows = await db.selectFrom("_emdash_media_revisions").select("id").execute();
++		expect(rows).toHaveLength(1);
++	});
++
++	it("records a digest once and rejects a different one", async () => {
++		const media = await readyMedia(db);
++		const revision = (await repo.ensureActiveRevision(media.id))!;
++		await repo.recordRevisionDigest(revision.id, DIGEST_A);
++		await repo.recordRevisionDigest(revision.id, DIGEST_A);
++		await expect(repo.recordRevisionDigest(revision.id, DIGEST_B)).rejects.toThrow(
++			/different digest/,
++		);
++		await expect(repo.recordRevisionDigest(revision.id, "NOT-HEX")).rejects.toThrow(TypeError);
++		expect((await repo.getRevision(revision.id))?.sha256).toBe(DIGEST_A);
++	});
++
++	it("keeps revisions after the media row is deleted", async () => {
++		const media = await readyMedia(db);
++		const revision = (await repo.ensureActiveRevision(media.id))!;
++		await new MediaRepository(db).delete(media.id);
++		expect((await repo.getRevision(revision.id))?.media_id).toBe(media.id);
++	});
++});
++
++describe("MediaOperationsRepository originals", () => {
++	let db: Kysely<Database>;
++	let repo: MediaOperationsRepository;
++
++	beforeEach(async () => {
++		db = await setupTestDatabase();
++		repo = new MediaOperationsRepository(db);
++	});
++
++	afterEach(async () => {
++		await teardownTestDatabase(db);
++	});
++
++	it("records an original once and never duplicates a backup", async () => {
++		const input = {
++			sha256: DIGEST_A,
++			storageKey: `media-originals/${DIGEST_A}`,
++			size: 100,
++			mimeType: "image/png",
++		};
++		expect((await repo.recordOriginal(input)).created).toBe(true);
++		expect((await repo.recordOriginal(input)).created).toBe(false);
++		await repo.recordOriginal({
++			...input,
++			sha256: DIGEST_B,
++			storageKey: `media-originals/${DIGEST_B}`,
++			size: 50,
++		});
++		expect(await repo.backupTotals()).toEqual({ count: 2, bytes: 150 });
++	});
++
++	it("reports zero totals when nothing is retained", async () => {
++		expect(await repo.backupTotals()).toEqual({ count: 0, bytes: 0 });
++	});
++});
++
++describe("MediaOperationsRepository journal", () => {
++	let db: Kysely<Database>;
++	let repo: MediaOperationsRepository;
++	const base = {
++		mediaId: "m1",
++		operationId: "op-1",
++		kind: "replace" as const,
++		expectedRevisionId: "r1",
++		candidateSha256: DIGEST_A,
++	};
++
++	beforeEach(async () => {
++		db = await setupTestDatabase();
++		repo = new MediaOperationsRepository(db);
++	});
++
++	afterEach(async () => {
++		await teardownTestDatabase(db);
++	});
++
++	it("creates an intent, returns the same operation for an identical repeat and rejects conflicting reuse", async () => {
++		const created = await repo.beginOperation(base);
++		expect(created.status).toBe("created");
++		expect(await repo.beginOperation(base)).toMatchObject({
++			status: "existing",
++			operation: { operation_id: "op-1", state: "intent" },
++		});
++		expect((await repo.beginOperation({ ...base, candidateSha256: DIGEST_B })).status).toBe(
++			"conflict",
++		);
++		expect((await repo.beginOperation({ ...base, expectedRevisionId: "r2" })).status).toBe(
++			"conflict",
++		);
++		expect((await repo.beginOperation({ ...base, kind: "restore" })).status).toBe("conflict");
++		expect(
++			(await repo.beginOperation({ ...base, operationId: "op-2", candidateSha256: DIGEST_B }))
++				.status,
++		).toBe("created");
++		expect(
++			await db.selectFrom("_emdash_media_operations").select("operation_id").execute(),
++		).toHaveLength(2);
++	});
++
++	it("scopes operation IDs to the media item", async () => {
++		expect((await repo.beginOperation(base)).status).toBe("created");
++		expect(
++			(await repo.beginOperation({ ...base, mediaId: "m2", candidateSha256: DIGEST_B })).status,
++		).toBe("created");
++	});
++
++	it("exactly one of several concurrent identical begins creates the operation", async () => {
++		const results = await Promise.all(Array.from({ length: 6 }, () => repo.beginOperation(base)));
++		expect(results.filter((result) => result.status === "created")).toHaveLength(1);
++		expect(results.filter((result) => result.status === "existing")).toHaveLength(5);
++	});
++
++	it("advances through states only in order and only from the expected state", async () => {
++		await repo.beginOperation(base);
++		const staged = await repo.advanceOperation("m1", "op-1", "intent", {
++			candidateRevisionId: "c1",
++		});
++		expect(staged).toMatchObject({ state: "candidate_staged", candidate_revision_id: "c1" });
++		expect(await repo.advanceOperation("m1", "op-1", "intent")).toBeNull();
++		const retained = await repo.advanceOperation("m1", "op-1", "candidate_staged", {
++			originalSha256: DIGEST_B,
++		});
++		expect(retained).toMatchObject({ state: "original_retained", original_sha256: DIGEST_B });
++		await expect(repo.advanceOperation("m1", "op-1", "original_retained")).rejects.toThrow(
++			/publication/,
++		);
++	});
++
++	it("durably ends an open operation and never overwrites a terminal one", async () => {
++		await repo.beginOperation(base);
++		const rejected = await repo.finishOperation("m1", "op-1", {
++			state: "rejected",
++			errorCode: "CONFLICT",
++		});
++		expect(rejected).toMatchObject({ state: "rejected", error_code: "CONFLICT" });
++		expect(JSON.parse(rejected!.receipt!)).toMatchObject({ status: "rejected", code: "CONFLICT" });
++		expect(
++			await repo.finishOperation("m1", "op-1", { state: "aborted", errorCode: "INTERRUPTED" }),
++		).toBeNull();
++		expect(await repo.advanceOperation("m1", "op-1", "intent")).toBeNull();
++		expect((await repo.getOperation("m1", "op-1"))?.state).toBe("rejected");
++		expect((await repo.beginOperation(base)).status).toBe("existing");
++	});
++
++	it("lists only open operations", async () => {
++		await repo.beginOperation(base);
++		await repo.beginOperation({ ...base, operationId: "op-2" });
++		await repo.finishOperation("m1", "op-2", { state: "aborted", errorCode: "INTERRUPTED" });
++		expect((await repo.listOpenOperations()).map((operation) => operation.operation_id)).toEqual([
++			"op-1",
++		]);
++	});
++
++	it("keeps conflicting reuse rejected after the media item is deleted", async () => {
++		const media = await readyMedia(db);
++		const revision = (await repo.ensureActiveRevision(media.id))!;
++		const request = { ...base, mediaId: media.id, expectedRevisionId: revision.id };
++		await repo.beginOperation(request);
++		await new MediaRepository(db).delete(media.id);
++		expect((await repo.beginOperation({ ...request, candidateSha256: DIGEST_B })).status).toBe(
++			"conflict",
++		);
++		expect((await repo.beginOperation(request)).status).toBe("existing");
++	});
++
++	it("derives a stable fingerprint from the request fields only", async () => {
++		const a = await operationFingerprint(base);
++		expect(a).toMatch(/^[0-9a-f]{64}$/);
++		expect(await operationFingerprint({ ...base })).toBe(a);
++		expect(await operationFingerprint({ ...base, mediaId: "m2" })).not.toBe(a);
++	});
++});
++
++describe("media operation records survive a restart", () => {
++	let directory: string;
++	const open = (): Kysely<Database> =>
++		new Kysely<Database>({
++			dialect: new SqliteDialect({ database: openNodeSqliteDatabase(join(directory, "site.db")) }),
++		});
++
++	beforeEach(async () => {
++		directory = await mkdtemp(join(tmpdir(), "emdash-media-ops-"));
++	});
++
++	afterEach(async () => {
++		await rm(directory, { recursive: true, force: true });
++	});
++
++	it("keeps revisions, originals and in-flight operations across a new connection", async () => {
++		const first = open();
++		await runMigrations(first);
++		const media = await readyMedia(first);
++		const repo = new MediaOperationsRepository(first);
++		const revision = (await repo.ensureActiveRevision(media.id))!;
++		await repo.recordRevisionDigest(revision.id, DIGEST_A);
++		await repo.recordOriginal({
++			sha256: DIGEST_A,
++			storageKey: `media-originals/${DIGEST_A}`,
++			size: 120,
++			mimeType: "image/png",
++		});
++		await repo.beginOperation({
++			mediaId: media.id,
++			operationId: "op-1",
++			kind: "replace",
++			expectedRevisionId: revision.id,
++			candidateSha256: DIGEST_B,
++		});
++		await repo.advanceOperation(media.id, "op-1", "intent", { candidateRevisionId: "candidate" });
++		await first.destroy();
++
++		const second = open();
++		await runMigrations(second); // restart runs migrations again; nothing is lost or duplicated
++		const restarted = new MediaOperationsRepository(second);
++		expect((await restarted.ensureActiveRevision(media.id))?.id).toBe(revision.id);
++		expect((await restarted.getRevision(revision.id))?.sha256).toBe(DIGEST_A);
++		expect((await restarted.getOriginal(DIGEST_A))?.size).toBe(120);
++		expect(await restarted.listOpenOperations()).toMatchObject([
++			{ operation_id: "op-1", state: "candidate_staged", candidate_revision_id: "candidate" },
++		]);
++		expect(
++			(
++				await restarted.beginOperation({
++					mediaId: media.id,
++					operationId: "op-1",
++					kind: "replace",
++					expectedRevisionId: revision.id,
++					candidateSha256: DIGEST_B,
++				})
++			).status,
++		).toBe("existing");
++		await second.destroy();
++	});
++});
+diff --git a/packages/core/tests/unit/media/safe/private-originals-exposure.test.ts b/packages/core/tests/unit/media/safe/private-originals-exposure.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c42463dfc0ed3b5994bee6e17929a3f5665137f9
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/private-originals-exposure.test.ts
+@@ -0,0 +1,99 @@
++import { mkdir, mkdtemp, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { GET } from "../../../../src/astro/routes/api/media/file/[...key].js";
++import { matchInternalMediaKey } from "../../../../src/media/image-endpoint.js";
++import { originalStorageKey } from "../../../../src/media/safe/original-keys.js";
++import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
++import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { LocalStorage } from "../../../../src/storage/local.js";
++import { isRefusedStorageKey } from "../../../../src/transfer/staging/keys.js";
++
++const bytes = new TextEncoder().encode("a private original that must never be served");
++
++describe("retained originals are not reachable through public delivery", () => {
++	let root: string;
++	let active: LocalStorage;
++	let digest: string;
++	let key: string;
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-exposure-"));
++		await mkdir(join(root, "uploads"), { recursive: true });
++		active = new LocalStorage({
++			directory: join(root, "uploads"),
++			baseUrl: "/_emdash/api/media/file",
++		});
++		const privateStorage = createLocalPrivateStorage({
++			directory: join(root, "private"),
++			publicDirectories: [join(root, "uploads")],
++		});
++		const retained = await createPrivateOriginalStore(privateStorage).retain(bytes, "image/png");
++		digest = retained.sha256;
++		key = retained.storageKey;
++		await active.upload({
++			key: "ordinary.png",
++			body: new Uint8Array([1, 2, 3]),
++			contentType: "image/png",
++		});
++	});
++
++	afterEach(async () => {
++		await rm(root, { recursive: true, force: true });
++	});
++
++	const request = (candidate: string) =>
++		GET({
++			params: { key: candidate },
++			locals: { emdash: { storage: active } },
++			request: new Request("https://example.com"),
++		} as never);
++
++	it("serves ordinary media from the active storage", async () => {
++		expect((await request("ordinary.png")).status).toBe(200);
++	});
++
++	it.each([
++		() => key,
++		() => key.toUpperCase(),
++		() => encodeURIComponent(key),
++		() => encodeURIComponent(encodeURIComponent(key)),
++		() => `./${key}`,
++		() => `x/../${key}`,
++		() => `/${key}`,
++		() => digest,
++		() => `media-originals/${digest}.png`,
++	])(
++		"answers 404 for the retained original under every spelling of its key (%#)",
++		async (spell) => {
++			const response = await request(spell());
++			expect(response.status).toBe(404);
++			expect(await response.text()).not.toContain("private original");
++		},
++	);
++
++	it("refuses the originals prefix even if the active storage holds an object there", async () => {
++		await active.upload({ key, body: bytes, contentType: "image/png" });
++		expect((await request(key)).status).toBe(404);
++		expect(isRefusedStorageKey(key)).toBe(true);
++		expect(isRefusedStorageKey(`MEDIA-ORIGINALS/${digest}`)).toBe(true);
++	});
++
++	it("is not matched as a transformable media key by the image endpoint", () => {
++		for (const href of [
++			`/_emdash/api/media/file/${key}`,
++			`https://site.example/_emdash/api/media/file/${encodeURIComponent(key)}`,
++		]) {
++			expect(matchInternalMediaKey(href)).toBeNull();
++		}
++	});
++
++	it("has no object in the active storage for the original's digest", async () => {
++		expect(await active.exists(digest)).toBe(false);
++		expect(await active.exists(originalStorageKey(digest))).toBe(false);
++		expect((await active.list()).files.map((file) => file.key)).toEqual(["ordinary.png"]);
++	});
++});
+diff --git a/packages/core/tests/unit/media/safe/private-originals.test.ts b/packages/core/tests/unit/media/safe/private-originals.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d839c00501f3488dea5ae83054ffed3e6eaac991
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/private-originals.test.ts
+@@ -0,0 +1,184 @@
++import { createHash } from "node:crypto";
++import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { originalStorageKey } from "../../../../src/media/safe/original-keys.js";
++import {
++	createLocalPrivateStorage,
++	PrivateStorageConfigError,
++} from "../../../../src/media/safe/private-local.js";
++import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import type { Storage } from "../../../../src/storage/types.js";
++
++const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
++const bytes = new TextEncoder().encode("exact original bytes \u0000ÿ");
++
++describe("private original storage on the local filesystem", () => {
++	let root: string;
++	let publicDirectory: string;
++	let privateDirectory: string;
++	let storage: Storage;
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-private-"));
++		publicDirectory = join(root, "uploads");
++		privateDirectory = join(root, "private");
++		await mkdir(publicDirectory, { recursive: true });
++		storage = createLocalPrivateStorage({
++			directory: privateDirectory,
++			publicDirectories: [publicDirectory],
++		});
++	});
++
++	afterEach(async () => {
++		await rm(root, { recursive: true, force: true });
++	});
++
++	it("retains verified bytes under a digest-addressed key and reads them back", async () => {
++		const store = createPrivateOriginalStore(storage);
++		const retained = await store.retain(bytes, "image/png");
++		expect(retained).toEqual({
++			sha256: sha(bytes),
++			storageKey: originalStorageKey(sha(bytes)),
++			size: bytes.byteLength,
++			created: true,
++		});
++		expect(await readFile(join(privateDirectory, retained.storageKey))).toEqual(Buffer.from(bytes));
++		expect(await store.read(retained.sha256)).toEqual(bytes);
++		expect(await store.exists(retained.sha256)).toBe(true);
++		expect(await store.exists("0".repeat(64))).toBe(false);
++	});
++
++	it("does not duplicate an identical original", async () => {
++		const store = createPrivateOriginalStore(storage);
++		await store.retain(bytes, "image/png");
++		expect((await store.retain(bytes, "image/png")).created).toBe(false);
++		expect((await storage.list()).files).toHaveLength(1);
++	});
++
++	it("replaces a corrupt object that holds the digest's name", async () => {
++		const store = createPrivateOriginalStore(storage);
++		const key = originalStorageKey(sha(bytes));
++		await mkdir(join(privateDirectory, "media-originals"), { recursive: true });
++		await writeFile(join(privateDirectory, key), "half-written");
++		await expect(store.read(sha(bytes))).rejects.toMatchObject({ code: "ORIGINAL_VERIFY_FAILED" });
++		expect((await store.retain(bytes, "image/png")).created).toBe(true);
++		expect(await store.read(sha(bytes))).toEqual(bytes);
++	});
++
++	it("reports a missing original", async () => {
++		await expect(createPrivateOriginalStore(storage).read("1".repeat(64))).rejects.toMatchObject({
++			code: "ORIGINAL_NOT_FOUND",
++		});
++	});
++
++	it("leaves no temporary file and no partial object when a write fails", async () => {
++		const failing: Storage = {
++			...storage,
++			upload: (options) =>
++				storage.upload({
++					...options,
++					body: new ReadableStream({
++						start: (controller) => controller.error(new Error("disk full")),
++					}),
++				}),
++		};
++		await expect(
++			createPrivateOriginalStore(failing).retain(bytes, "image/png"),
++		).rejects.toMatchObject({ code: "ORIGINAL_STORAGE_ERROR" });
++		const names = await readdir(join(privateDirectory, "media-originals")).catch(() => []);
++		expect(names).toEqual([]);
++	});
++
++	it("never offers public or signed URLs", () => {
++		expect(() => storage.getPublicUrl("media-originals/x")).toThrow(/no public URLs/);
++		expect(() => storage.getSignedUploadUrl({ key: "k", contentType: "image/png" })).toThrow(
++			/no signed URLs/,
++		);
++	});
++
++	it("refuses keys that escape the directory", async () => {
++		await expect(storage.download("../uploads/secret")).rejects.toThrow();
++		await expect(
++			storage.upload({ key: "/etc/x", body: bytes, contentType: "image/png" }),
++		).rejects.toThrow();
++		await expect(storage.exists("a/../../x")).rejects.toThrow();
++	});
++
++	it("rejects directories that overlap a public directory, including through a symlink", async () => {
++		const reject = (directory: string) => () =>
++			createLocalPrivateStorage({ directory, publicDirectories: [publicDirectory] });
++		expect(reject(publicDirectory)).toThrow(PrivateStorageConfigError);
++		expect(reject(join(publicDirectory, "private"))).toThrow(PrivateStorageConfigError);
++		expect(reject(root)).toThrow(PrivateStorageConfigError);
++		const link = join(root, "alias");
++		await symlink(publicDirectory, link);
++		expect(reject(join(link, "hidden"))).toThrow(PrivateStorageConfigError);
++		expect(reject("")).toThrow(PrivateStorageConfigError);
++		expect(reject(join(root, "elsewhere"))).not.toThrow();
++	});
++});
++
++describe("private original verification", () => {
++	function memory(tamper: (bytes: Uint8Array) => Uint8Array): Storage & { deleted: string[] } {
++		const objects = new Map<string, Uint8Array>();
++		const deleted: string[] = [];
++		const notFound = () => Object.assign(new Error("File not found"), { code: "NOT_FOUND" });
++		return {
++			deleted,
++			async upload({ key, body }) {
++				const data =
++					body instanceof ReadableStream
++						? new Uint8Array(await new Response(body).arrayBuffer())
++						: body;
++				objects.set(key, tamper(new Uint8Array(data)));
++				return { key, url: "", size: data.byteLength };
++			},
++			async download(key) {
++				const data = objects.get(key);
++				if (!data) throw notFound();
++				return {
++					body: new Blob([data]).stream(),
++					contentType: "application/octet-stream",
++					size: data.byteLength,
++				};
++			},
++			async delete(key) {
++				deleted.push(key);
++				objects.delete(key);
++			},
++			async exists(key) {
++				return objects.has(key);
++			},
++			async list() {
++				return { files: [] };
++			},
++			getSignedUploadUrl() {
++				throw new Error("none");
++			},
++			getPublicUrl() {
++				throw new Error("none");
++			},
++		};
++	}
++
++	it("removes and rejects an object whose stored bytes differ from its digest", async () => {
++		const storage = memory((data) => {
++			data[data.length - 1] ^= 1;
++			return data;
++		});
++		await expect(
++			createPrivateOriginalStore(storage).retain(bytes, "image/png"),
++		).rejects.toMatchObject({ code: "ORIGINAL_VERIFY_FAILED" });
++		expect(storage.deleted).toEqual([originalStorageKey(sha(bytes))]);
++		expect(await storage.exists(originalStorageKey(sha(bytes)))).toBe(false);
++	});
++
++	it("rejects a digest that is not lowercase hex", () => {
++		expect(() => originalStorageKey("../etc/passwd")).toThrow(TypeError);
++		expect(() => originalStorageKey("A".repeat(64))).toThrow(TypeError);
++	});
++});

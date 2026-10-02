@@ -1,0 +1,113 @@
+{
+  "baseCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+  "patches": [
+    {
+      "name": "0001-media-revisions-private-originals.patch",
+      "tasks": [
+        "2.1"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/api/media-file-private-keys.test.ts",
+        "packages/core/tests/unit/transfer/staging.test.ts",
+        "packages/core/tests/unit/database/migration-imports.test.ts"
+      ],
+      "scope": "Migration 092, revision/original/operation repository, digest-verified private original store, local private storage guards, and public-route refusal of the originals prefix, run on Node/SQLite in the patched worktree with every migration applied. Operation records are verified across a reopened file-backed database.",
+      "limits": "No Postgres, D1 or Cloudflare run; no runtime or integration wiring of private storage; no editor, native or bridge writer integration; the journal has no publication transition yet.",
+      "sha256": "83b7e2d100f34f378d289b4f8e4b7590a81ec5dbc8b264956a7483e6add6135d",
+      "resultingTree": "e6018576d1df51b87fbad003ae5881b2a62eb68c",
+      "files": [
+        "A\tpackages/core/src/database/migrations/092_safe_media_operations.ts",
+        "M\tpackages/core/src/database/migrations/runner.ts",
+        "A\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/database/types.ts",
+        "A\tpackages/core/src/media/safe/digest.ts",
+        "A\tpackages/core/src/media/safe/original-keys.ts",
+        "A\tpackages/core/src/media/safe/private-local.ts",
+        "A\tpackages/core/src/media/safe/private-originals.ts",
+        "M\tpackages/core/src/transfer/staging/keys.ts",
+        "A\tpackages/core/tests/unit/database/migrations/092_safe_media_operations.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/media-operations-repository.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/private-originals-exposure.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/private-originals.test.ts"
+      ]
+    },
+    {
+      "name": "0002-bounded-output-validation.patch",
+      "tasks": [
+        "2.2"
+      ],
+      "relatedTests": [],
+      "scope": "Host validation of replacement output: header checks (format signature, animation, pixel limit, geometry), digest declaration, admission control over decoded pixels in flight, and a Sharp child-process full decode with a wall-time kill, exercised with real JPEG, PNG and WebP, hostile and mutated inputs on Node.",
+      "limits": "Only the Sharp child-process decoder exists; hosts without Sharp report no decoder and must leave mutation off. Not called from any route, native access or bridge yet. Pilot limits are measured on one machine. No workerd, Postgres or D1 run.",
+      "sha256": "5a02cbe00e7448f41ad6c0acae2357683a9641b0a5079b29f4c0901e571aff73",
+      "resultingTree": "b3d17fa434e02e470c42cda245327594199370da",
+      "files": [
+        "M\tpackages/core/package.json",
+        "A\tpackages/core/src/media/safe/admission.ts",
+        "A\tpackages/core/src/media/safe/decode-limits.ts",
+        "A\tpackages/core/src/media/safe/decoder.ts",
+        "A\tpackages/core/src/media/safe/sharp-child-decoder.ts",
+        "A\tpackages/core/src/media/safe/sniff.ts",
+        "A\tpackages/core/src/media/safe/validate-output.ts",
+        "A\tpackages/core/tests/unit/media/safe/output-fixtures.ts",
+        "A\tpackages/core/tests/unit/media/safe/output-validation.test.ts",
+        "M\tpnpm-lock.yaml"
+      ]
+    },
+    {
+      "name": "0003-staged-replacement-receipts.patch",
+      "tasks": [
+        "2.3"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/api/media-file-private-keys.test.ts"
+      ],
+      "scope": "Staged replacement service: validation, immutable candidate objects in the active storage, verified private original retention, a single-transaction publication of pointer, byte-derived metadata and receipt, idempotent resume, and the public file route resolving a stable key to the active revision. Exercised with a file-backed SQLite database, real local storage, the real route handler and simulated process death after every step.",
+      "limits": "Node/SQLite only; D1 is refused, not supported. No editor, native or bridge writer advances revisions, and the image endpoint, export, native and asset reads still resolve the stable key directly, so mutation must stay disabled. Orphan cleanup, restore and the authorized bridges are later tasks.",
+      "sha256": "db376cfc2a3e65d4b0d9fec96677640e4599c0d5d408de503b666531e4d8b63d",
+      "resultingTree": "658d68d724de7d8deb82d0a42e36b564f7eda7c5",
+      "files": [
+        "M\tpackages/core/src/astro/routes/api/media/file/[...key].ts",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "A\tpackages/core/src/media/safe/error-text.ts",
+        "A\tpackages/core/src/media/safe/replacement-service.ts",
+        "A\tpackages/core/src/media/safe/resolve-object.ts",
+        "A\tpackages/core/src/media/safe/revision-keys.ts",
+        "M\tpackages/core/src/transfer/staging/keys.ts",
+        "A\tpackages/core/tests/unit/media/safe/replacement-service.test.ts"
+      ]
+    },
+    {
+      "name": "0004-fenced-writers-and-readers.patch",
+      "tasks": [
+        "2.4"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/astro/middleware-image-endpoint.test.ts",
+        "packages/core/tests/unit/api/media-file-private-keys.test.ts"
+      ],
+      "scope": "Opt-in `safeMedia` configuration, startup wiring and a revision-aware storage that every reader of media bytes goes through; the manual replace route using the fenced service (any geometry, focal point reset on changed geometry); legacy byte writes and client-supplied dimensions refused for managed rows; deletion leaving recovery data and failing stale operations. Exercised through the real route handlers, file-backed SQLite and local storage.",
+      "limits": "Node/SQLite and local storage only; D1 and other storage adapters are refused at startup. The image endpoint's transform pipeline itself is not run against a replaced image (only that its requests take the runtime path), and the delivery freshness bounds are task 3.2. Deleting media deliberately keeps its revisions, originals and journal. No bridge or native replace operation exists yet (task 3.1). Orphan cleanup and restore are tasks 2.5 and 2.6.",
+      "sha256": "b551cbe0fa337d505476934a5689f7f71b9c10ee28eb1ce83ddc69aae9f4728e",
+      "resultingTree": "2324fa8efaf18c23e72d1c88ebe9f77239598354",
+      "files": [
+        "M\tpackages/core/src/astro/integration/index.ts",
+        "M\tpackages/core/src/astro/integration/runtime.ts",
+        "M\tpackages/core/src/astro/middleware.ts",
+        "M\tpackages/core/src/astro/routes/api/media/[id]/replace.ts",
+        "M\tpackages/core/src/astro/types.ts",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/database/repositories/media.ts",
+        "M\tpackages/core/src/emdash-runtime.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "A\tpackages/core/src/media/safe/runtime.ts",
+        "M\tpackages/core/src/media/safe/validate-output.ts",
+        "M\tpackages/core/tests/unit/astro/middleware-image-endpoint.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/media-operations-repository.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/output-validation.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/replacement-service.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/safe-media-integration.test.ts"
+      ]
+    }
+  ]
+}
