@@ -18,8 +18,9 @@ dialog lists one permission, `media:read`: metadata of ready media, without file
 
 The same package also provides the report as a native plugin, for a site that cannot use the registry
 or its sandbox. It is **read-only like the registry edition**: it reports and never changes media. It
-has the same plugin ID, `media:read` capability, storage, settings, routes, report page and widget,
-so a site that switches between the editions keeps its scan results and settings.
+has the same plugin ID, storage, settings, routes, report page and widget, so a site that switches
+between the editions keeps its scan results and settings. Where the registry edition estimates
+savings from metadata, the native edition can [measure them](#measured-savings-native-edition).
 
 A native plugin **runs without isolation, in the site process**. EmDash's capability checks still gate
 what the plugin's context offers, but they are not a security boundary: the plugin's code has the same
@@ -42,6 +43,59 @@ you switch, remove one first.
 
 The package is not published to npm yet. The native edition is tested against the plugin context
 only, not yet on a running EmDash site.
+
+### Measured savings (native edition)
+
+With [Sharp](https://sharp.pixelplumbing.com/) installed in the site (`sharp` is an optional peer
+dependency, tested with 0.35.4), a native scan **measures** each saving instead of estimating it. It
+reads each image's bytes, re-encodes them locally in the same format and at the same dimensions with
+the configured preset and metadata policy, records the output size, and discards the output. It
+never writes media: the plugin has no capability to, and the scan only reads. Without Sharp, or on a
+host that does not grant byte access, the native edition estimates from metadata like the registry
+edition.
+
+The native edition declares one capability more than the registry edition, `media:bytes:read`, to
+read image bytes. It cannot write media either.
+
+- **Results.** Each stored result is marked `measured` or `estimated`, and the report labels savings
+  accordingly. A measured image is listed when its saving reaches both thresholds in the settings
+  (default 50 KB and 20%). Images uploaded while or after a measured scan runs are estimated on upload,
+  labelled as estimates, and measured by the next scan.
+- **Skips** come from the decoded image: not JPEG, PNG or WebP by content (GIF, SVG, AVIF and others are
+  skipped by type without being read), malformed, animated, over the byte or pixel limit, a colour
+  profile or bit depth that re-encoding would change, or metadata the GPS setting cannot be applied to.
+- **Failures.** A busy, crashed or interrupted encode is tried again in a later tick, up to three
+  attempts; other errors, such as a timeout, are recorded as failures and listed in the report.
+- **Pace.** Images are encoded one at a time. A tick handles at most 20 images and starts no new image
+  after 20 seconds, so it finishes well inside the one-minute schedule and leaves the site process its
+  other cores. That is far slower than estimating: at the cap, 10,000 images take more than eight
+  hours.
+
+**Presets** (setting *Encoding preset*). The report lists the exact Sharp options of the chosen preset.
+
+| Preset | JPEG | WebP (lossy) | PNG and lossless WebP |
+| --- | --- | --- | --- |
+| `balanced` (default) | quality 80, 4:2:0, mozjpeg defaults | quality 80 | lossless |
+| `high-fidelity` | quality 90, 4:4:4, mozjpeg defaults | quality 90 | lossless |
+
+The qualities are starting points, not yet qualified on a photograph corpus. Palette quantization and
+lossless JPEG are not available. Orientation, alpha and ICC profiles are kept.
+
+**Metadata** (setting *Remove GPS position*, off by default). Metadata is kept, including copyright.
+With the setting on, the measurement removes GPS position from EXIF and XMP; the stored file is not
+changed.
+
+**Sample.** The report has a *Sample* button on each listed image and a *Sample top result* button.
+A sample processes one image with the current settings and shows the byte counts, dimensions and
+format before and after, the time taken and the encoder options. It changes nothing: neither the
+media nor the scan results. It shows numbers only, no images: Block Kit shows an image only by URL,
+and the processed output is never stored, so it has none.
+
+**Limits of the local processor.** Inputs up to 24 megapixels and 50 MiB; EmDash lets a plugin read at
+most 16 MiB of a file, so larger files are skipped. One encode is killed after 60 seconds. These
+limits, and the tick bounds above, come from measurements on a development machine (Apple M1 Pro,
+synthetic noise images, worst case about 12 seconds and 1.5 GB at 24 MP) and are provisional until
+measured on hosting hardware.
 
 ## Why it is read-only
 
@@ -90,7 +144,8 @@ dimensions.
   to update it.
 - **Image savings** (a dashboard widget): the estimated saving and the number of images to review.
 - **Settings**: the largest useful edge in pixels (default 2560), and the smallest saving worth
-  reporting in KB (default 50) and as a percentage of the file (default 20).
+  reporting in KB (default 50) and as a percentage of the file (default 20). The native edition adds
+  the encoding preset and GPS removal for [measured savings](#measured-savings-native-edition).
 
 Opening the report and starting a scan require the `plugins:manage` permission. The page and widget
 are in English; numbers follow the administrator's locale.
@@ -145,7 +200,8 @@ hook and route, because neither the Node runner nor the test hosts enforce it.
   screenshots saved as JPEG or WebP are not distinguished from photographs.
 - Larger photographs need fewer bytes per pixel than the calibration images, so for them the scan
   errs towards reporting less.
-- Measuring real savings needs the image bytes and an encoder, which a sandboxed plugin does not have.
+- Measuring real savings needs the image bytes and an encoder, which a sandboxed plugin does not have;
+  only the native edition measures.
 - An upload made at the moment a scan starts can be counted twice in the totals. The stored results
   are not affected.
 - The report has no link to each image in the media library: Block Kit links can target content,
@@ -163,8 +219,10 @@ pnpm build       # Build the sandbox bundle with the EmDash plugin CLI, then the
 ```
 
 Both editions are wrappers over the shared code in `src/handlers.ts`: `src/plugin.ts` is the sandboxed
-entry and `src/native.ts` the native one. The sandboxed entry must not import anything native-only,
-and the native declarations must match `emdash-plugin.jsonc`; tests check both.
+entry and `src/native.ts` the native one, which adds the measured scan and sample (`src/measure.ts`)
+over the local processor (`src/processor/`). The sandboxed entry must not import anything native-only,
+and the native declarations must match `emdash-plugin.jsonc` apart from the byte-read capability and
+the two native settings; tests check both.
 
 Releases are published by the `verco.app` Atmosphere account, pinned by its DID in
 `emdash-plugin.jsonc`, so a publish from any other account fails.

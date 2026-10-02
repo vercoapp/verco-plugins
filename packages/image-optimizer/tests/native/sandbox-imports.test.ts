@@ -24,12 +24,20 @@ function reachable(entry: string): Set<string> {
 }
 
 describe('the sandboxed entry', () => {
-  it('does not reach Sharp, Node built-ins or the native processor', () => {
+  it('does not reach Sharp, Node built-ins, the native processor or the measured scan', () => {
     const modules = [...reachable('plugin.ts')].map((module) => module.replace(`${src}/`, ''));
     expect(modules).toContain('plugin.ts');
+    expect(modules).toContain('handlers.ts');
     expect(
-      modules.filter((module) => /sharp|^node:|processor\/(local|container|worker-source|index)/.test(module)),
+      modules.filter((module) =>
+        /sharp|^node:|processor\/(local|container|worker-source|index)|^measure\.ts$|^native\.ts$/.test(module),
+      ),
     ).toEqual([]);
+  });
+
+  it('reaches the measured scan only through the native entry', () => {
+    const native = [...reachable('native.ts')].map((module) => module.replace(`${src}/`, ''));
+    expect(native).toEqual(expect.arrayContaining(['measure.ts', 'processor/index.ts', 'processor/local.ts']));
   });
 
   it('may use the processor types, presets and limits, which import nothing at runtime', () => {

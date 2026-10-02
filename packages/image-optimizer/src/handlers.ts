@@ -1,13 +1,15 @@
 /**
  * The plugin's behaviour, written once for both editions. Every function takes the plugin context, so
  * the sandboxed entry (`plugin.ts`, handlers of `(routeCtx, ctx)`) and the native entry (`native.ts`,
- * handlers of one context) are thin wrappers over these. Nothing here imports native-only code.
+ * handlers of one context) are thin wrappers over these. Nothing here imports native-only code: the
+ * native entry passes its additions (the measured scan and the sample) in as a `NativeScan`.
  */
 import type { BlockResponse } from '@emdash-cms/blocks/server';
 import type { CronEvent, MediaAfterUploadEvent, PluginContext, SandboxedRouteContext } from 'emdash/plugin';
 
 import {
   ACTION_RESULTS_PAGE,
+  ACTION_SAMPLE,
   ACTION_START,
   parseAdminRequest,
   reportPage,
@@ -16,7 +18,9 @@ import {
   SAVINGS_WIDGET,
   savingsWidget,
   SKIPPED_SHOWN,
+  type NativeReportView,
   type ReportView,
+  type SampleView,
 } from './admin.ts';
 import {
   advanceScan,
@@ -25,11 +29,28 @@ import {
   SCAN_TASK,
   SCAN_TASK_SCHEDULE,
   startScan,
+  type MeasureSpec,
   type ScanDeps,
   type ScanRun,
   type StoredResult,
 } from './job.ts';
 import { resolveScanOptions, type ScanOptions } from './scanner.ts';
+
+type Settings = ReadonlyMap<string, unknown>;
+
+/**
+ * What the native edition adds. Each method returns `null` (or `undefined` for `advance`) when the
+ * context cannot measure, without byte access or without Sharp; the shared behaviour then applies.
+ */
+export interface NativeScan {
+  /** The settings of a measured run. Throws `RangeError` for settings the processor cannot use. */
+  measureSpec(ctx: PluginContext, deps: ScanDeps, settings: Settings): MeasureSpec | null;
+  /** Advances a measured run, or returns `undefined` when this context cannot measure. */
+  advance(ctx: PluginContext, deps: ScanDeps): Promise<ScanRun | null | undefined>;
+  report(ctx: PluginContext, deps: ScanDeps, settings: Settings): NativeReportView | null;
+  /** Throws `RangeError` for settings the processor cannot use. */
+  sample(ctx: PluginContext, deps: ScanDeps, settings: Settings, mediaId: string): Promise<SampleView | null>;
+}
 
 function deps(ctx: PluginContext): ScanDeps {
   const media = ctx.media;
@@ -43,12 +64,16 @@ function results(ctx: PluginContext): ScanDeps['results'] {
   return collection;
 }
 
+/** All plugin settings. One bridge call. */
+async function readSettings(ctx: PluginContext): Promise<Settings> {
+  return new Map((await ctx.settings.list()).map(({ key, value }) => [key, value]));
+}
+
 /**
- * Reads scan options from plugin settings, which use kilobytes and percent; unset settings take the
- * defaults. Throws `RangeError` for values the scan cannot use. One bridge call.
+ * Scan options from plugin settings, which use kilobytes and percent; unset settings take the
+ * defaults. Throws `RangeError` for values the scan cannot use.
  */
-async function readOptions(ctx: PluginContext): Promise<ScanOptions> {
-  const settings = new Map((await ctx.settings.list()).map(({ key, value }) => [key, value]));
+function optionsFrom(settings: Settings): ScanOptions {
   const [maxDimension, minSavingsKB, minSavingsPercent] = ['maxDimension', 'minSavingsKB', 'minSavingsPercent'].map(
     (key) => settings.get(key),
   );
@@ -66,20 +91,24 @@ type BeginOutcome =
   | { ok: false; error: 'INVALID_SETTINGS' | 'CRON_UNAVAILABLE'; message?: string };
 
 /**
- * Starts a scan, or reports the one already running, and leaves the work to the scheduled task.
- * Four bridge calls: settings, reading and writing the state, and scheduling the task.
+ * Starts a scan, or reports the one already running, and leaves the work to the scheduled task. The
+ * native edition starts a measured scan when it can measure. Four bridge calls: settings, reading and
+ * writing the state, and scheduling the task.
  */
-async function beginScan(ctx: PluginContext): Promise<BeginOutcome> {
+async function beginScan(ctx: PluginContext, native?: NativeScan): Promise<BeginOutcome> {
   let options: ScanOptions;
+  let measure: MeasureSpec | null = null;
   try {
-    options = await readOptions(ctx);
+    const settings = await readSettings(ctx);
+    options = optionsFrom(settings);
+    if (native) measure = native.measureSpec(ctx, deps(ctx), settings);
   } catch (error) {
     if (!(error instanceof RangeError)) throw error;
     return { ok: false, error: 'INVALID_SETTINGS', message: error.message };
   }
   if (!ctx.cron) return { ok: false, error: 'CRON_UNAVAILABLE' };
 
-  const { started, run } = await startScan(deps(ctx), options);
+  const { started, run } = await startScan(deps(ctx), options, measure);
   await ctx.cron.schedule(SCAN_TASK, { schedule: SCAN_TASK_SCHEDULE });
   return { ok: true, started, run };
 }
@@ -91,10 +120,17 @@ function beginToast(outcome: BeginOutcome): NonNullable<BlockResponse['toast']> 
       : { type: 'error', message: 'The scan did not start: this site cannot run scheduled tasks.' };
   }
   if (!outcome.started) return { type: 'info', message: 'A scan is already running.' };
+  if (outcome.run.measure) {
+    return {
+      type: 'success',
+      message:
+        'Scan started. It re-encodes each image to measure the saving, which is much slower than estimating, and runs in the background.',
+    };
+  }
   return { type: 'success', message: 'Scan started. It runs in the background, about 300 images a minute.' };
 }
 
-/** Three bridge calls, or four when the caller does not already have the run. */
+/** Four bridge calls, or five when the caller does not already have the run. */
 async function loadReport(
   ctx: PluginContext,
   cursor: string | null,
@@ -120,9 +156,10 @@ async function loadReport(
     page = await flagged(null);
     continued = false;
   }
-  const [skipped, skippedTotal, run] = await Promise.all([
+  const [skipped, skippedTotal, failed, run] = await Promise.all([
     collection.query({ where: { status: 'skipped' }, limit: SKIPPED_SHOWN }),
     collection.count({ status: 'skipped' }),
+    collection.query({ where: { status: 'failed' }, limit: SKIPPED_SHOWN }),
     known ?? readScan(ctx),
   ]);
 
@@ -132,40 +169,79 @@ async function loadReport(
     run,
     results: { items: asResults(page.items), cursor: page.hasMore && page.cursor ? page.cursor : null },
     skipped: { items: asResults(skipped.items), total: skippedTotal },
+    failed: { items: asResults(failed.items), more: failed.hasMore },
     continued,
     locale,
   };
 }
 
-/** The scheduled task. At most TICK_CALL_BUDGET bridge calls to advance, plus one to cancel. */
-export async function handleCron(event: CronEvent, ctx: PluginContext): Promise<void> {
+/**
+ * The scheduled task. In the sandboxed edition, at most TICK_CALL_BUDGET bridge calls to advance, plus
+ * one to cancel. The native edition advances a measured run by measuring when it can, and otherwise
+ * continues it with estimates.
+ */
+export async function handleCron(event: CronEvent, ctx: PluginContext, native?: NativeScan): Promise<void> {
   if (event.name !== SCAN_TASK) return;
-  const run = await advanceScan(deps(ctx));
+  const scan = deps(ctx);
+  let run: ScanRun | null | undefined;
+  if (native && (await readScan(scan))?.measure) run = await native.advance(ctx, scan);
+  if (run === undefined) run = await advanceScan(scan);
   if (!run || run.phase === 'complete') await ctx.cron?.cancel(SCAN_TASK);
 }
 
+/**
+ * Uploads are estimated from metadata in both editions: measuring an upload would hold the request
+ * for an encode. A measured run's report labels them as estimates until the next scan.
+ */
 export async function handleUpload(event: MediaAfterUploadEvent, ctx: PluginContext): Promise<void> {
-  await recordUpload(deps(ctx), event.media.id, await readOptions(ctx));
+  await recordUpload(deps(ctx), event.media.id, optionsFrom(await readSettings(ctx)));
 }
 
 /** The Block Kit route behind the report page and the dashboard widget. */
-export async function handleAdmin(routeCtx: Pick<SandboxedRouteContext, 'input' | 'ui'>, ctx: PluginContext) {
+export async function handleAdmin(
+  routeCtx: Pick<SandboxedRouteContext, 'input' | 'ui'>,
+  ctx: PluginContext,
+  native?: NativeScan,
+) {
   const request = parseAdminRequest(routeCtx.input);
   const locale = resolveLocale(routeCtx.ui?.locale);
   if (request?.kind === 'page' && request.page === `widget:${SAVINGS_WIDGET}`) {
     return savingsWidget(await readScan(ctx), locale);
   }
+
+  // The native additions need the settings; the sandboxed edition does not read them here.
+  const settings = native ? await readSettings(ctx) : null;
+  const withNative = async (view: ReportView, sample?: SampleView | null): Promise<ReportView> => {
+    if (!native || !settings) return view;
+    const extras = native.report(ctx, deps(ctx), settings);
+    return { ...view, native: extras && sample ? { ...extras, sample } : extras };
+  };
+
   if (request?.kind === 'action' && request.actionId === ACTION_START) {
-    const outcome = await beginScan(ctx);
+    const outcome = await beginScan(ctx, native);
     const view = await loadReport(ctx, null, locale, outcome.ok ? outcome.run : undefined);
-    return reportPage(view, beginToast(outcome));
+    return reportPage(await withNative(view), beginToast(outcome));
+  }
+  if (native && settings && request?.kind === 'action' && request.actionId === ACTION_SAMPLE && request.mediaId) {
+    let sample: SampleView | null;
+    try {
+      sample = await native.sample(ctx, deps(ctx), settings, request.mediaId);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      const view = await withNative(await loadReport(ctx, null, locale));
+      return reportPage(view, {
+        type: 'error',
+        message: `The sample did not run. Check the plugin settings: ${error.message}.`,
+      });
+    }
+    return reportPage(await withNative(await loadReport(ctx, null, locale), sample));
   }
   const cursor = request?.kind === 'action' && request.actionId === ACTION_RESULTS_PAGE ? request.cursor : null;
-  return reportPage(await loadReport(ctx, cursor, locale));
+  return reportPage(await withNative(await loadReport(ctx, cursor, locale)));
 }
 
-export async function handleScanStart(ctx: PluginContext) {
-  return beginScan(ctx);
+export async function handleScanStart(ctx: PluginContext, native?: NativeScan) {
+  return beginScan(ctx, native);
 }
 
 export async function handleScanStatus(ctx: PluginContext) {

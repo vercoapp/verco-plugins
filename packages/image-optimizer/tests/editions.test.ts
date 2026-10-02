@@ -275,12 +275,18 @@ describe('native declarations', () => {
 
       expect(plugin.id).toBe(manifest.id);
       expect(plugin.version).toBe(manifest.version);
-      expect(plugin.capabilities).toEqual(manifest.capabilities);
+      // The native edition adds byte access and the measured scan's settings, nothing else.
+      expect(manifest.capabilities).toEqual(['media:read']);
+      expect(plugin.capabilities).toEqual([...manifest.capabilities, 'media:bytes:read']);
       expect(plugin.allowedHosts).toEqual(manifest.allowedHosts);
       expect(plugin.storage).toEqual(manifest.storage);
       expect(plugin.admin.pages).toEqual(manifest.admin.pages);
       expect(plugin.admin.widgets).toEqual(manifest.admin.widgets);
-      expect(plugin.admin.settingsSchema).toEqual(manifest.admin.settingsSchema);
+      const { preset, removeGps, ...shared } = plugin.admin.settingsSchema!;
+      expect(shared).toEqual(manifest.admin.settingsSchema);
+      expect(Object.keys(manifest.admin.settingsSchema ?? {})).not.toContain('preset');
+      expect(preset).toMatchObject({ type: 'select', default: 'balanced' });
+      expect(removeGps).toMatchObject({ type: 'boolean', default: false });
       // The manifest lists hooks and routes by name, or as an object when they carry options.
       const named = (entries: Array<string | { name: string }>) =>
         entries.map((entry) => (typeof entry === 'string' ? entry : entry.name)).sort();
@@ -308,9 +314,9 @@ describe('native declarations', () => {
     });
   });
 
-  it('are read-only: media:read is the only capability and there is no network', () => {
+  it('are read-only: media and byte reads are the only capabilities and there is no network', () => {
     const plugin = createPlugin();
-    expect(plugin.capabilities).toEqual(['media:read']);
+    expect(plugin.capabilities).toEqual(['media:read', 'media:bytes:read']);
     expect(plugin.allowedHosts).toEqual([]);
   });
 });

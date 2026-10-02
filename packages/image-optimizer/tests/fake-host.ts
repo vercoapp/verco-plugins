@@ -14,6 +14,8 @@ export interface FakeMedia {
   size: number | null;
   width?: number | null;
   height?: number | null;
+  /** The file, for hosts created with `readBytes`. */
+  bytes?: Uint8Array;
 }
 
 type Where = Record<string, unknown>;
@@ -40,8 +42,19 @@ export function jpegs(count: number, overrides: Partial<FakeMedia> = {}, prefix 
   }));
 }
 
-export function fakeHost(library: FakeMedia[]) {
+/** A media item as the host lists it: metadata only. */
+function listed({ bytes: _bytes, ...item }: FakeMedia) {
+  return { ...item, url: '', createdAt: '' };
+}
+
+/**
+ * `readBytes`: give the context `media.readBytes`, as the native edition's `media:bytes:read` does. It
+ * returns the stored array itself, not a copy, so writing into it would change the library and a
+ * before-and-after comparison would see it.
+ */
+export function fakeHost(library: FakeMedia[], options: { readBytes?: boolean } = {}) {
   const kv = new Map<string, { value: unknown; revision: number }>();
+  const readCalls: string[] = [];
   const results = new Map<string, StoredResult>();
   const settings = new Map<string, unknown>();
   const tasks = new Map<string, { schedule: string }>();
@@ -101,15 +114,27 @@ export function fakeHost(library: FakeMedia[]) {
       const items = matching.slice(start, start + limit);
       const hasMore = start + limit < matching.length;
       return {
-        items: items.map((item) => ({ ...item, url: '', createdAt: '' })),
+        items: items.map(listed),
         hasMore,
         ...(hasMore ? { cursor: items.at(-1)!.id } : {}),
       };
     },
     async get(id: string) {
       const item = library.find((candidate) => candidate.id === id);
-      return item ? { ...item, url: '', createdAt: '' } : null;
+      return item ? listed(item) : null;
     },
+    ...(options.readBytes
+      ? {
+          async readBytes(id: string, read?: { maxBytes?: number }) {
+            readCalls.push(id);
+            const item = library.find((candidate) => candidate.id === id);
+            if (!item?.bytes) throw new Error('Media item is not ready or does not exist');
+            // The host's limit error is a RangeError, as in EmDash.
+            if (item.bytes.byteLength > (read?.maxBytes ?? 10 * 1024 * 1024)) throw new RangeError('Media exceeds the limit');
+            return { bytes: item.bytes, filename: item.filename, mimeType: item.mimeType, size: item.bytes.byteLength };
+          },
+        }
+      : {}),
   });
 
   const storage = bridge({
@@ -199,6 +224,8 @@ export function fakeHost(library: FakeMedia[]) {
     tasks,
     logs,
     listCalls,
+    /** Media IDs passed to `readBytes`, in order. */
+    readCalls,
     library,
     state: () => kv.get(SCAN_STATE_KEY)?.value as ScanRun | undefined,
     /** Bridge calls made while `action` runs. */

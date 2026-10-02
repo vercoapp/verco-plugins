@@ -205,7 +205,8 @@ export function scanItem(item: ScanMediaItem, options: ScanOptions = DEFAULT_SCA
   return { status: 'flagged', id, format, findings, estimate };
 }
 
-function worthReporting(savings: number, size: number, options: ScanOptions): boolean {
+/** Whether a saving meets both the byte and the ratio thresholds. */
+export function worthReporting(savings: number, size: number, options: ScanOptions): boolean {
   return savings > 0 && savings >= options.minSavingsBytes && savings / size >= options.minSavingsRatio;
 }
 
