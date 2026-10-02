@@ -129,6 +129,25 @@
         "M\tpackages/core/src/media/safe/runtime.ts",
         "A\tpackages/core/tests/unit/media/safe/reconciliation.test.ts"
       ]
+    },
+    {
+      "name": "0006-byte-exact-restore.patch",
+      "tasks": [
+        "2.6"
+      ],
+      "scope": "Fenced byte-exact restore through `MediaReplacementService.restore` and `listRestorableOriginals`: a retained original of the same media item is published against an expected current revision through the same journal, receipt and commit point, idempotent per operation ID; current editorial metadata is kept (the focal point only while dimensions are unchanged), byte-derived metadata describes the restored bytes, and the bytes it replaces are retained in turn. An independent recovery entry point (`openSafeMediaRecovery`, exported as `emdash/media/safe-recovery`) opens the database and storage directories directly, without the runtime, plugins or an image decoder, and lists, restores by media ID and reconciles. Exercised with a file-backed SQLite database and real local storage: restored bytes match the original digest, a stale restore conflicts without staging anything, deletion is never undone, interruptions after each step resume or reconcile to one publication, and missing or corrupt originals publish nothing.",
+      "limits": "Node/SQLite and local storage only; D1 is not supported. Restore is not exposed through any route, bridge or native plugin API yet (task 3.1), and there is no CLI command: the recovery entry point is a function. Restore does not decode the original; it relies on the digest match with bytes the site served before. Reconcile through the recovery entry point only while the site is stopped, because its locks cover one process. Cache refresh after a restore is not measured (task 3.2).",
+      "sha256": "1587539dd817c474112c2de18781906ae0cf10ba02ff2721aab0596cd9cad560",
+      "resultingTree": "05d0f1faedb6e3c2f7bd8c4c47901a0f05c010c1",
+      "files": [
+        "M\tpackages/core/package.json",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "A\tpackages/core/src/media/safe/recovery.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/validate-output.ts",
+        "A\tpackages/core/tests/unit/media/safe/restore.test.ts",
+        "M\tpackages/core/tsdown.config.ts"
+      ]
     }
   ]
 }

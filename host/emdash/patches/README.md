@@ -11,6 +11,7 @@ tree, changed files, related tests, scope and limits.
 | [`0003-staged-replacement-receipts.patch`](0003-staged-replacement-receipts.patch) | Replacement service: staged immutable candidates, verified private originals, single-transaction publication with a durable receipt, idempotent resume, and the file route resolving stable keys to the active revision. |
 | [`0004-fenced-writers-and-readers.patch`](0004-fenced-writers-and-readers.patch) | Opt-in `safeMedia`: startup wiring, revision-aware storage for every reader, the editor replace route using the fenced service, legacy writers fenced. |
 | [`0005-interrupted-operation-reconciliation.patch`](0005-interrupted-operation-reconciliation.patch) | Reconciliation: interrupted operations are completed through the fenced steps or aborted, and objects no record needs are removed, after startup, on maintenance ticks and on demand. One writing process is assumed. |
+| [`0006-byte-exact-restore.patch`](0006-byte-exact-restore.patch) | Fenced byte-exact restore of a retained original through the same journal and receipts, and `emdash/media/safe-recovery`, a recovery entry point that works from the database and storage directories without the runtime or any plugin. |
 
 Patches are cumulative and apply in order; each records the git tree it produces.
 
@@ -21,9 +22,24 @@ apply to a pristine tree with `pnpm host:pilot-check`. Export changes with
 last exported patch and runs every patch's tests.
 
 The patches are a pilot. They do not yet cover every consumer of media bytes, the plugin-facing
-bridges, restore, or installation and rollback instructions, and they are not a supported version
-range. Reconciliation assumes a single writing process; another process's work is protected only by
-a grace period. A plugin adapter alone cannot establish safe media publication.
+bridges (restore is not reachable from plugins or routes), or installation and rollback instructions,
+and they are not a supported version range. Reconciliation assumes a single writing process; another
+process's work is protected only by a grace period.
+
+To restore a media item with the site stopped and no plugin installed (Node, SQLite, local storage):
+
+```js
+import { openSafeMediaRecovery } from "emdash/media/safe-recovery";
+
+const recovery = await openSafeMediaRecovery({
+  databasePath: "./data.db",
+  uploadsDirectory: "./uploads",
+  privateDirectory: "./.emdash/private",
+});
+console.log(await recovery.listRestorableOriginals(mediaId));
+console.log(await recovery.restoreMedia(mediaId)); // undoes the change that produced the active revision
+await recovery.close();
+``` A plugin adapter alone cannot establish safe media publication.
 
 ## License
 
