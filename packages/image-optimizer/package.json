@@ -1,0 +1,47 @@
+{
+  "name": "image-optimizer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only image optimization report for EmDash media libraries.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "directory": "packages/image-optimizer"
+  },
+  "type": "module",
+  "main": "dist/index.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.mts"
+    },
+    "./sandbox": "./dist/plugin.mjs"
+  },
+  "files": [
+    "dist",
+    "emdash-plugin.jsonc"
+  ],
+  "scripts": {
+    "validate": "emdash-plugin validate",
+    "build": "emdash-plugin build",
+    "dev": "emdash-plugin dev",
+    "typecheck": "tsc --noEmit",
+    "test": "emdash-plugin validate && vitest run",
+    "bundle": "emdash-plugin bundle",
+    "calibrate": "node --experimental-strip-types calibration/calibrate.mjs",
+    "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs"
+  },
+  "peerDependencies": {
+    "emdash": ">=1.1.0"
+  },
+  "devDependencies": {
+    "@emdash-cms/blocks": "1.1.0",
+    "@emdash-cms/plugin-cli": "0.13.2",
+    "@emdash-cms/plugin-test": "0.2.7",
+    "emdash": "1.1.0",
+    "sharp": "0.35.4",
+    "typescript": "5.9.3",
+    "vite": "8.3.2",
+    "vitest": "4.1.11"
+  }
+}

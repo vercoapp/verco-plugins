@@ -1,0 +1,49 @@
+{
+  "$schema": "./node_modules/@emdash-cms/plugin-cli/schemas/emdash-plugin.schema.json",
+
+  "slug": "image-optimizer",
+  "name": "Image optimizer",
+  // Placeholder: set the publisher DID and the security contact before the first release.
+  "publisher": "did:plc:placeholder",
+
+  "license": "MIT",
+  "author": { "name": "Verco" },
+  "security": { "url": "https://example.com/security" },
+  "description": "Reports images in the media library that could be smaller. Read-only: it never changes media.",
+
+  // Trust contract. The scan reads media metadata only (type, size, dimensions):
+  // no bytes, no writes, no outbound network.
+  "capabilities": ["media:read"],
+  "allowedHosts": [],
+  "storage": {
+    // One scan result per media item, keyed by media ID.
+    "results": { "indexes": ["runId", "status", ["status", "estimateBytes"]] },
+  },
+
+  "admin": {
+    "pages": [{ "path": "/report", "label": "Image report", "icon": "image" }],
+    "widgets": [{ "id": "savings", "title": "Image savings", "size": "third" }],
+    "settingsSchema": {
+      "maxDimension": {
+        "type": "number",
+        "label": "Largest useful edge (px)",
+        "description": "Images wider or taller than this are reported as larger than the site needs.",
+        "default": 2560,
+        "min": 1,
+      },
+      "minSavingsKB": {
+        "type": "number",
+        "label": "Smallest saving to report (KB)",
+        "default": 50,
+        "min": 0,
+      },
+      "minSavingsPercent": {
+        "type": "number",
+        "label": "Smallest saving to report (% of the file)",
+        "default": 20,
+        "min": 0,
+        "max": 100,
+      },
+    },
+  },
+}
