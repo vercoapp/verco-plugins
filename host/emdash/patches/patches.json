@@ -181,6 +181,27 @@
         "A\tpackages/core/tests/integration/runtime/plugin-safe-media.test.ts",
         "A\tpackages/core/tests/unit/media/safe/native-access.test.ts"
       ]
+    },
+    {
+      "name": "0008-read-retained-original.patch",
+      "tasks": [
+        "3.1-native-read"
+      ],
+      "scope": "Private read of a retained original: `ctx.media.safe.readOriginal(mediaId, sha256, { maxBytes })` for the same native plugins and hosts as `0007`. It returns the bytes of an original retained by a published operation on that media item (one listed by `listRestorableOriginals`), verified against `sha256` and the recorded size, with its MIME type and size, as a typed result. It refuses malformed input (`INVALID_REQUEST`), missing, deleted or unready media, also when deleted during the read (`MEDIA_UNAVAILABLE`), another item's original, an unknown digest or the active revision's digest (`NO_ORIGINAL`), a recorded size over the limit without reading (`TOO_LARGE`), a missing stored object (`ORIGINAL_MISSING`), a stored object that does not match its digest or recorded size (`ORIGINAL_CORRUPT`, read only up to the recorded size) and unreadable private storage (`ORIGINAL_UNREADABLE`, retryable). The limit defaults to and may not exceed those of `ctx.media.readBytes` (10 MiB and 16 MiB). The read writes nothing: it takes no lock, creates no baseline revision, writes no journal entry and returns no URL or storage key. Exercised with a file-backed SQLite database and real local storage, comparing every record, every stored object and its modification time before and after, and with no access for native plugins without the capability, in-process sandboxed-format plugins and hosts without `safeMedia`, through the context factory and a runtime plugin route.",
+      "limits": "Pilot only: Node, SQLite and local storage; D1 and object storage are not supported. Native plugins only; there is no bridge for sandboxed plugins and no route. Originals larger than 16 MiB cannot be read through this method. The bytes are held in memory in full, like `readBytes`; there is no streaming read. Media deleted after the read completes is not detected, and identical bytes retained for two media items are one content-addressed original, readable through either item. Reads are not attributed or logged. The method name and result shape are provisional, like the rest of protocol 1.",
+      "sha256": "f388f185ef2b7536fa740ec5a152db3bc6a20bbf823060a4c832a2ce01f57e71",
+      "resultingTree": "fe704b4f92e0ed8a9dd343487f1cd118ba193b62",
+      "files": [
+        "M\tpackages/core/src/index.ts",
+        "M\tpackages/core/src/media/safe/plugin-access.ts",
+        "M\tpackages/core/src/media/safe/private-originals.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/plugins/index.ts",
+        "M\tpackages/core/src/plugins/native-capabilities.ts",
+        "M\tpackages/core/src/plugins/types.ts",
+        "M\tpackages/core/tests/integration/runtime/plugin-safe-media.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/read-original.test.ts"
+      ]
     }
   ]
 }
