@@ -105,4 +105,4 @@ pnpm typecheck
 pnpm build       # Build the sandbox bundle with the EmDash plugin CLI.
 ```
 
-The publisher and security contact in `emdash-plugin.jsonc` are placeholders until the first release.
+The publisher in `emdash-plugin.jsonc` is a placeholder until the first release.

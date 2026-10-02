@@ -1,0 +1,8 @@
+# Keeps the pinned GitHub Actions current. npm dependencies are pinned to the EmDash target in
+# host/emdash/target.json and are updated together with it, not by Dependabot.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -6,8 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
+    "url": "git+https://github.com/vercoapp/verco-plugins.git",
     "directory": "packages/image-optimizer"
   },
+  "homepage": "https://github.com/vercoapp/verco-plugins/tree/main/packages/image-optimizer#readme",
+  "bugs": "https://github.com/vercoapp/verco-plugins/issues",
   "type": "module",
   "main": "dist/index.mjs",
   "exports": {

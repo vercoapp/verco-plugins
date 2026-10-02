@@ -3,12 +3,13 @@
 
   "slug": "image-optimizer",
   "name": "Image optimizer",
-  // Placeholder: set the publisher DID and the security contact before the first release.
+  // Placeholder: set the publisher handle or DID before the first release.
   "publisher": "did:plc:placeholder",
 
   "license": "MIT",
   "author": { "name": "Verco" },
-  "security": { "url": "https://example.com/security" },
+  "security": { "email": "security@verco.app" },
+  "repo": "https://github.com/vercoapp/verco-plugins",
   "description": "Reports images in the media library that could be smaller. Read-only: it never changes media.",
 
   // Trust contract. The scan reads media metadata only (type, size, dimensions):
