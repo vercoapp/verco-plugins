@@ -68,7 +68,7 @@ describe('report page', () => {
     expect(find(page.blocks, 'stats')?.items).toEqual([
       { label: 'Images scanned', value: '4' },
       { label: 'Could be smaller', value: '3', description: '1 without a saving estimate' },
-      { label: 'Estimated saving', value: '721 kB', description: 'From metadata only' },
+      { label: 'Estimated saving', value: '740.2 kB', description: 'From metadata only' },
       { label: 'Skipped', value: '1', description: '1 unsupported format' },
     ]);
 
@@ -79,10 +79,10 @@ describe('report page', () => {
         format: 'JPEG',
         dimensions: '1200 × 800',
         size: '601 kB',
-        saving: '361 kB',
+        saving: '370.6 kB',
         findings: 'Heavy encoding',
       },
-      expect.objectContaining({ file: 'photo-0.jpg', saving: '360 kB' }),
+      expect.objectContaining({ file: 'photo-0.jpg', saving: '369.6 kB' }),
       expect.objectContaining({ file: 'photo.png', saving: 'Not estimated', findings: 'PNG may be a photo' }),
     ]);
     expect(table?.next_cursor).toBeUndefined();
@@ -164,35 +164,35 @@ describe('report page', () => {
   it('applies settings in kilobytes and percent', async () => {
     host = await createPluginRuntimeTestHost();
     await heavyJpegs(host, 1);
-    // The heavy JPEG saves 360 kB, 60% of its size.
+    // The heavy JPEG saves 369.6 kB, 61.6% of its size.
+    await host.fixtures.plugin.setting('minSavingsPercent', 62);
+    expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '0' });
+
     await host.fixtures.plugin.setting('minSavingsPercent', 61);
+    await host.fixtures.plugin.setting('minSavingsKB', 370);
     expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '0' });
 
-    await host.fixtures.plugin.setting('minSavingsPercent', 60);
-    await host.fixtures.plugin.setting('minSavingsKB', 361);
-    expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '0' });
-
-    await host.fixtures.plugin.setting('minSavingsKB', 360);
+    await host.fixtures.plugin.setting('minSavingsKB', 369);
     expect(find((await host.admin.act('/report', 'start_scan')).blocks, 'stats')?.items[1]).toMatchObject({ value: '1' });
   });
 
   it('formats numbers for the admin locale', async () => {
     host = await createPluginRuntimeTestHost();
-    // 1.29 B/px; target 960_000 * 0.25 = 240_000, so the saving is 994_567 bytes.
+    // 1.56 B/px; target 960_000 * 0.24 = 230_400, so the saving is 1_269_600 bytes.
     await host.fixtures.media({
       filename: 'big.jpg',
       mimeType: 'image/jpeg',
       bytes: BYTES,
-      reportedSize: 1_234_567,
+      reportedSize: 1_500_000,
       width: 1200,
       height: 800,
     });
     const german = await host.admin.act('/report', 'start_scan', { locale: 'de' });
-    expect(find(german.blocks, 'stats')?.items[2]?.value).toBe('994,6 kB');
-    expect(find(german.blocks, 'table', 'results')?.rows[0]).toMatchObject({ size: '1,2 MB', dimensions: '1200 × 800' });
+    expect(find(german.blocks, 'stats')?.items[2]?.value).toBe('1,3 MB');
+    expect(find(german.blocks, 'table', 'results')?.rows[0]).toMatchObject({ size: '1,5 MB', dimensions: '1200 × 800' });
 
     const english = await host.admin.loadPage('/report', { locale: 'en' });
-    expect(find(english.blocks, 'stats')?.items[2]?.value).toBe('994.6 kB');
+    expect(find(english.blocks, 'stats')?.items[2]?.value).toBe('1.3 MB');
   });
 
   it('falls back to English for a locale Intl does not accept', () => {
@@ -221,7 +221,7 @@ describe('savings widget', () => {
       {
         type: 'stats',
         items: [
-          { label: 'Estimated saving', value: '360 kB' },
+          { label: 'Estimated saving', value: '369.6 kB' },
           { label: 'Images to review', value: '1' },
         ],
       },

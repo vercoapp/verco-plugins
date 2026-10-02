@@ -53,10 +53,35 @@ until the next scan.
 
 A scan keeps the settings it started with.
 
+## Calibration
+
+The densities the scan assumes were measured on the Kodak suite (24 photographs, 768 × 512)
+re-encoded with Sharp 0.35.4 at its default qualities. Each value is the 75th percentile of what
+those photographs needed (JPEG 0.24, WebP 0.21, AVIF 0.10 bytes per pixel), and a resized image is
+assumed to keep its area ratio to the power 0.9 of its bytes. Against the same photographs, with
+the 50 KB minimum turned off because they are small:
+
+| | JPEG | WebP | AVIF |
+| --- | --- | --- | --- |
+| Heavy uploads reported (quality 95, AVIF 80) | 21 of 24 | 20 of 24 | 24 of 24 |
+| Already-optimized uploads reported | 1 of 24 | 1 of 24 | 1 of 24 |
+| Estimated ÷ actual saving, median (range) | 0.79 (0.47–1.30) | 0.76 (0.38–1.42) | 0.78 (0.32–1.20) |
+
+So estimates usually understate the saving, and one image in a few is overstated by up to about
+40%. Photographs saved as PNG measured 1.34 to 2.26 bytes per pixel and flat graphics 0.03 to 0.06,
+well either side of the 1.0 used for `possible-photo-as-png`.
+
+To repeat or extend this, `pnpm calibrate:fetch-kodak` downloads the suite into the ignored
+`.calibration/` directory and `pnpm calibrate [directory]` measures any directory of lossless
+photographs.
+
 ## Limits
 
-- The typical densities behind `heavy-encoding` are heuristics for photographic content, not
-  measurements of an encoder. Graphics, screenshots and already-optimized files can be misjudged.
+- The densities are percentiles over one small corpus, not a model of image content. A detailed
+  photograph and a simple one of the same size and type get the same estimate. Graphics and
+  screenshots saved as JPEG or WebP are not distinguished from photographs.
+- Larger photographs need fewer bytes per pixel than the calibration images, so for them the scan
+  errs towards reporting less.
 - Measuring real savings needs the image bytes and an encoder, which a sandboxed plugin does not have.
 - An upload made at the moment a scan starts can be counted twice in the totals. The stored results
   are not affected.

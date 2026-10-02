@@ -47,7 +47,7 @@ describe('scan through the sandbox runtime', () => {
       flagged: 1,
       ok: 1,
       skipped: { 'unsupported-format': 1 },
-      estimatedSavingsBytes: 4_771_200,
+      estimatedSavingsBytes: 4_710_218,
     });
 
     const stored = await host.inspect.storage.list<StoredResult>('results');
@@ -56,7 +56,7 @@ describe('scan through the sandbox runtime', () => {
       filename: 'heavy.jpg',
       status: 'flagged',
       findings: ['oversized-dimensions', 'heavy-encoding'],
-      estimateBytes: 4_771_200,
+      estimateBytes: 4_710_218,
     });
     expect(await host.inspect.scheduledTasks()).toEqual([]);
 

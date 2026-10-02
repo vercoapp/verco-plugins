@@ -142,7 +142,7 @@ describe('sweep', () => {
     const run = host.state()!;
     expect(run.totals.scanned).toBe(250);
     expect(run.totals.flagged).toBe(250);
-    expect(run.totals.estimatedSavingsBytes).toBe(250 * 360_000);
+    expect(run.totals.estimatedSavingsBytes).toBe(250 * 369_600);
     expect(run.finishedAt).not.toBeNull();
     expect(run.updatedAt > run.startedAt).toBe(true);
     expect(run.updatedAt >= run.finishedAt!).toBe(true);
@@ -151,7 +151,7 @@ describe('sweep', () => {
       runId: run.runId,
       status: 'flagged',
       findings: ['heavy-encoding'],
-      estimateBytes: 360_000,
+      estimateBytes: 369_600,
       estimateBasis: 'resize-and-reencode',
     });
     expect(await advanceScan(host.deps)).toEqual(run);

@@ -13,7 +13,8 @@ function image(overrides: Partial<ScanMediaItem>): ScanMediaItem {
   return { id: 'm1', mimeType: 'image/jpeg', size: 200_000, width: 1200, height: 800, ...overrides };
 }
 
-// With the default maxDimension of 2560, a 4000 x 3000 image scales by 0.64, keeping 0.4096 of its area.
+// With the default maxDimension of 2560, a 4000 x 3000 image scales by 0.64, keeping 0.4096 of its area
+// and, by the resize model, 0.4096 ** 0.9 = 0.44784 of its bytes.
 
 describe('lossy formats', () => {
   it('leaves a well-sized, typically encoded JPEG alone', () => {
@@ -21,54 +22,54 @@ describe('lossy formats', () => {
   });
 
   it('estimates resizing and re-encoding for an oversized, heavy JPEG', () => {
-    // 12 MP at 0.5 B/px; target 12e6 * 0.4096 * 0.25 = 1_228_800 bytes.
+    // 12 MP at 0.5 B/px; target 12e6 * 0.24 * 0.44784 = 1_289_782 bytes.
     const result = scanItem(image({ size: 6_000_000, width: 4000, height: 3000 }));
     expect(result).toEqual({
       status: 'flagged',
       id: 'm1',
       format: 'jpeg',
       findings: ['oversized-dimensions', 'heavy-encoding'],
-      estimate: { bytes: 4_771_200, basis: 'resize-and-reencode' },
+      estimate: { bytes: 4_710_218, basis: 'resize-and-reencode' },
     });
   });
 
   it('estimates only the resize when the encoding is already light', () => {
-    // 0.2 B/px is below the JPEG typical density, so the saving is the removed area.
+    // 0.2 B/px is below the JPEG typical density, so only the resize saves bytes.
     const result = scanItem(image({ size: 2_400_000, width: 4000, height: 3000 }));
     expect(result).toMatchObject({
       findings: ['oversized-dimensions'],
-      estimate: { bytes: 1_416_960, basis: 'resize' },
+      estimate: { bytes: 1_325_181, basis: 'resize' },
     });
   });
 
   it('flags heavy encoding without a resize', () => {
-    // 0.625 B/px; target 960_000 * 0.25 = 240_000 bytes.
+    // 0.625 B/px; target 960_000 * 0.24 = 230_400 bytes.
     const result = scanItem(image({ size: 600_000 }));
     expect(result).toMatchObject({
       findings: ['heavy-encoding'],
-      estimate: { bytes: 360_000, basis: 'resize-and-reencode' },
+      estimate: { bytes: 369_600, basis: 'resize-and-reencode' },
     });
   });
 
   it('uses a lower typical density for AVIF than for JPEG', () => {
-    // 0.2 B/px is light for JPEG but heavy for AVIF (0.12 B/px): target 115_200, saving 76_800.
+    // 0.2 B/px is light for JPEG but heavy for AVIF (0.1 B/px): target 96_000, saving 96_000.
     expect(scanItem(image({ size: 192_000 })).status).toBe('ok');
     expect(scanItem(image({ mimeType: 'image/avif', size: 192_000 }))).toMatchObject({
       format: 'avif',
       findings: ['heavy-encoding'],
-      estimate: { bytes: 76_800 },
+      estimate: { bytes: 96_000 },
     });
   });
 });
 
 describe('reporting thresholds', () => {
   it('drops a saving below the byte threshold', () => {
-    // Slightly over the limit: 500_000 * (1 - (2560 / 2600)^2) is about 15 KB.
+    // Slightly over the limit: the resize saves about 14 KB of 500 KB.
     expect(scanItem(image({ size: 500_000, width: 2600, height: 1000 })).status).toBe('ok');
   });
 
   it('drops a saving below the ratio threshold', () => {
-    // A light JPEG scaled from 4000 to 3795 px loses about 10% of its area, so about 10% of 3.2 MB.
+    // A light JPEG scaled from 4000 to 3795 px is estimated to lose about 9% of its bytes.
     const options = resolveScanOptions({ minSavingsBytes: 0, maxDimension: 3795 });
     const item = image({ size: 3_200_000, width: 4000, height: 4000 });
     expect(scanItem(item, options).status).toBe('ok');
@@ -76,12 +77,12 @@ describe('reporting thresholds', () => {
   });
 
   it('reports a saving exactly at both thresholds and nothing below either', () => {
-    // 0.5 B/px over 409_600 px; target 409_600 * 0.25 = 102_400, so the saving is exactly half.
+    // 0.5 B/px over 409_600 px; target 409_600 * 0.24 = 98_304, so the saving is 106_496, or 52%.
     const item = image({ size: 204_800, width: 640, height: 640 });
-    const exact = resolveScanOptions({ minSavingsBytes: 102_400, minSavingsRatio: 0.5 });
-    expect(scanItem(item, exact)).toMatchObject({ status: 'flagged', estimate: { bytes: 102_400 } });
-    expect(scanItem(item, { ...exact, minSavingsBytes: 102_401 }).status).toBe('ok');
-    expect(scanItem(item, { ...exact, minSavingsRatio: 0.500001 }).status).toBe('ok');
+    const exact = resolveScanOptions({ minSavingsBytes: 106_496, minSavingsRatio: 0.52 });
+    expect(scanItem(item, exact)).toMatchObject({ status: 'flagged', estimate: { bytes: 106_496 } });
+    expect(scanItem(item, { ...exact, minSavingsBytes: 106_497 }).status).toBe('ok');
+    expect(scanItem(item, { ...exact, minSavingsRatio: 0.520001 }).status).toBe('ok');
   });
 });
 
@@ -93,7 +94,7 @@ describe('lossless formats', () => {
       id: 'm1',
       format: 'png',
       findings: ['oversized-dimensions'],
-      estimate: { bytes: 1_771_200, basis: 'resize' },
+      estimate: { bytes: 1_656_477, basis: 'resize' },
     });
   });
 
@@ -221,7 +222,7 @@ describe('summary', () => {
         'missing-dimensions': 0,
         'invalid-metadata': 1,
       },
-      estimatedSavingsBytes: 360_000,
+      estimatedSavingsBytes: 369_600,
       unestimated: 1,
     });
   });

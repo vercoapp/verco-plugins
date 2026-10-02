@@ -86,17 +86,36 @@ const FORMATS: Readonly<Record<string, ImageFormat>> = {
   'image/tiff': 'tiff',
 };
 
+/*
+ * Calibration (calibration/calibrate.mjs): the Kodak suite, 24 photographs at 768 x 512, encoded with
+ * Sharp 0.35.4 at its default qualities (JPEG and WebP 80, AVIF 50). Rerun it on other photographs
+ * before changing these values. Larger photographs encode to fewer bytes per pixel, so values from
+ * this small-image corpus err towards reporting less.
+ */
+
 /**
- * Bytes per pixel of a typical web-quality encoding. These are heuristics for photographic
- * content, not measurements of any particular encoder.
+ * Bytes per pixel of a web-quality encoding of a photograph: the 75th percentile of the
+ * calibration corpus (medians: JPEG 0.187, WebP 0.146, AVIF 0.069). With the default 20% minimum
+ * saving, a file is reported only above 1.25 times this, so already-optimized images are rarely
+ * reported, and detailed photographs are reported less often than they could be.
  */
 const TYPICAL_BYTES_PER_PIXEL: Readonly<Record<'jpeg' | 'webp' | 'avif', number>> = {
-  jpeg: 0.25,
-  webp: 0.18,
-  avif: 0.12,
+  jpeg: 0.24,
+  webp: 0.21,
+  avif: 0.1,
 };
 
-/** A PNG above this density is more likely a photograph than a graphic. */
+/**
+ * Re-encoding at a smaller size keeps more bytes than the area alone suggests, because detail per
+ * pixel rises. Halving the width kept a median 0.285 of JPEG size against 0.25 of the area;
+ * `0.25 ** 0.9` is 0.287.
+ */
+const RESIZE_EXPONENT = 0.9;
+
+/**
+ * A PNG above this density is more likely a photograph than a graphic. Calibration photographs as
+ * PNG measured 1.34 to 2.26 B/px; flat synthetic graphics with text measured 0.03 to 0.06.
+ */
 const PNG_PHOTO_BYTES_PER_PIXEL = 1;
 
 const SKIP_REASONS: readonly SkipReason[] = [
@@ -154,7 +173,7 @@ export function scanItem(item: ScanMediaItem, options: ScanOptions = DEFAULT_SCA
   const pixels = width * height;
   const bytesPerPixel = size / pixels;
   const scale = Math.min(1, options.maxDimension / Math.max(width, height));
-  const areaRatio = scale * scale;
+  const sizeRatio = (scale * scale) ** RESIZE_EXPONENT;
 
   const findings: FindingCode[] = [];
   let estimate: SavingsEstimate | null = null;
@@ -162,7 +181,7 @@ export function scanItem(item: ScanMediaItem, options: ScanOptions = DEFAULT_SCA
   if (format === 'jpeg' || format === 'webp' || format === 'avif') {
     const typical = TYPICAL_BYTES_PER_PIXEL[format];
     const heavy = bytesPerPixel > typical;
-    const targetBytes = pixels * areaRatio * Math.min(bytesPerPixel, typical);
+    const targetBytes = pixels * Math.min(bytesPerPixel, typical) * sizeRatio;
     if (scale < 1) findings.push('oversized-dimensions');
     if (heavy) findings.push('heavy-encoding');
     if (findings.length > 0) {
@@ -171,7 +190,7 @@ export function scanItem(item: ScanMediaItem, options: ScanOptions = DEFAULT_SCA
   } else if (scale < 1) {
     // No model of lossless recompression, so only the resize is estimated.
     findings.push('oversized-dimensions');
-    estimate = { bytes: Math.round(size * (1 - areaRatio)), basis: 'resize' };
+    estimate = { bytes: Math.round(size * (1 - sizeRatio)), basis: 'resize' };
   }
 
   if (estimate !== null && !worthReporting(estimate.bytes, size, options)) {
