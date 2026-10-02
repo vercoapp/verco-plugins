@@ -46,6 +46,12 @@ export class FencedMediaFixture {
 
   close() { this.db.close(); }
 
+  /** Run `work` as the revision writer; subclasses use this to commit their own publication. */
+  authorized(work) {
+    this.#authorized = true;
+    try { return work(); } finally { this.#authorized = false; }
+  }
+
   async stage(bytes) {
     const output = Buffer.from(bytes);
     // The proof corpus is limited to small still PNGs; these are fixture limits.

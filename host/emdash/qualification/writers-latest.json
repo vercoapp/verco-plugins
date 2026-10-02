@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-10-01T23:52:12.129Z",
+  "timestamp": "2026-10-02T00:14:11.236Z",
   "targetCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
-  "node": "v22.23.2",
+  "node": "v24.10.0",
   "profile": "node-sqlite-local-writer-participation-prototype",
   "fixtureOnly": true,
   "routeSourceDigests": {
