@@ -19,7 +19,6 @@
     "host:pilot-check": "node scripts/host-pilot.mjs --check",
     "host:patch-export": "node scripts/export-host-patch.mjs",
     "host:qualify-patch": "node scripts/qualify-host-patch.mjs"
-    "host:measure-decoder": "node scripts/measure-decoder-budget.mjs"
   },
   "devDependencies": {
     "@astrojs/node": "11.1.5",
