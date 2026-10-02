@@ -39,12 +39,19 @@
     "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs"
   },
   "peerDependencies": {
-    "emdash": ">=1.1.0"
+    "emdash": ">=1.1.0",
+    "sharp": "^0.35.4"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@emdash-cms/blocks": "1.1.0",
     "@emdash-cms/plugin-cli": "0.13.2",
     "@emdash-cms/plugin-test": "0.2.7",
+    "@types/node": "26.6.4",
     "emdash": "1.1.0",
     "sharp": "0.35.4",
     "typescript": "5.9.3",
