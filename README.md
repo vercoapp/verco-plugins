@@ -9,10 +9,9 @@ independently, and all of them share one pinned EmDash target and one test setup
 | Package | Status | What it is |
 | --- | --- | --- |
 | `packages/media-host-adapter` | pre-release | Plugin-side guard for the image optimizer: reports whether a host supports safe media operations and rejects apply and restore unless it does. |
-| `packages/image-optimizer` | in development | Read-only report of images that could be smaller, estimated from media metadata. Optimizing existing media needs host support that EmDash does not provide yet; see below. |
+| `packages/image-optimizer` | published as [`@verco.app/image-optimizer`](https://plugins.emdashcms.com/plugins/@verco.app/image-optimizer) | Read-only report of images that could be smaller, estimated from media metadata. Optimizing in place is planned once EmDash can replace media safely; see below. |
 
-No plugin has been published yet. Nothing here modifies media on a real site, and all experiments
-use disposable data.
+Nothing here modifies media on a real site, and all experiments use disposable data.
 
 ## Shared tooling
 

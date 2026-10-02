@@ -9,7 +9,11 @@
   "author": { "name": "Verco" },
   "security": { "email": "security@verco.app" },
   "repo": "https://github.com/vercoapp/verco-plugins",
-  "description": "Reports images in the media library that could be smaller. Read-only: it never changes media.",
+  "description": "Finds images in the media library that could be smaller. Read-only for now: safe in-place optimization needs EmDash support.",
+  "keywords": ["images", "media", "optimization", "performance", "report"],
+  "sections": {
+    "description": "The image report lists the images in your media library that are larger than your site needs, ordered by estimated saving, and shows on the dashboard how much could be saved. It reads only each image's type, size and dimensions, so every saving is an estimate.\n\n**Why it is read-only.** Optimizing an image means replacing its file. EmDash has no way yet for a plugin to replace a file safely: replacing overwrites the file at the same address, so the original is lost, a bad result cannot be undone, and an editor's change made at the same moment can be overwritten. Sandboxed plugins cannot replace files at all. Rather than work around that, the plugin reports and never changes media.\n\n**Optimizing is planned.** In-place optimization will be added once EmDash can replace an image while keeping its original and refusing conflicting changes. That support has been proposed to the EmDash project: https://github.com/emdash-cms/emdash/discussions/3740"
+  },
 
   // Trust contract. The scan reads media metadata only (type, size, dimensions):
   // no bytes, no writes, no outbound network.
