@@ -36,14 +36,27 @@ git diff --cached -- . ':!AGENTS.md' | grep -n -E "/Users/|@gmail|docs/|openspec
 git log -1 --format='%an <%ae>'   # must be the noreply identity
 ```
 
-History rewrites are reserved for the maintainer's explicit request. Never push, force-push or
-delete branches on your own initiative.
+History rewrites are reserved for the maintainer's explicit request. Push only when asked, never
+force-push, and never delete branches on your own initiative.
 
-## Branches
+## Repository layout
+
+This is a monorepo of EmDash plugins (a pnpm workspace). Each plugin is its own package under
+`packages/<name>/` with its own `package.json` (name, version, `license`, `repository.directory`),
+README and tests, and is versioned and published independently. The EmDash pin in
+`host/emdash/target.json` is shared; never copy it into a plugin. The qualification material
+(`experiments/`, `scripts/`, `fixtures/`, `host/emdash/patches/`) currently serves the image optimizer
+only, so do not extend it for another plugin; give that plugin its own directory, and keep the root
+README to one table row per plugin. If a plugin needs its own contributors, license or release
+cadence, extract it to its own repository instead of special-casing it here.
+
+## Branches and pull requests
 
 `main` holds the qualification prototypes. `add-safe-media-operations` adds recovery and decoder
-budgets. `safe-media-host-implementation` is stacked on it and adds the host patches. Add new work on
-the most specific branch that needs it.
+budgets. `safe-media-host-implementation` is stacked on it and adds the host patches. Open pull
+requests stacked the same way (the second targets the first's branch). Keep feature branches current
+by merging the base branch into them, not by rebasing and force-pushing. Never force-push. Pull request
+descriptions follow the same publication rules as commits: no references to local-only documents.
 
 ## Working conventions
 
