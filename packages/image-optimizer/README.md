@@ -1,9 +1,36 @@
 # image-optimizer
 
 A sandboxed EmDash plugin that reports images in the media library that are probably larger than they
-need to be. It is **read-only**: it never changes, replaces or deletes media.
+need to be. It is **read-only for now**: it never changes, replaces or deletes media.
 
-Status: in development, not published.
+Published in the EmDash plugin registry as
+[`@verco.app/image-optimizer`](https://plugins.emdashcms.com/plugins/@verco.app/image-optimizer).
+
+## Install
+
+On an EmDash site with a [sandbox runner](https://docs.emdashcms.com/deployment/plugin-sandbox/)
+configured, open **Registry** in the admin, search for "image optimizer" and install it. The consent
+dialog lists one permission, `media:read`: metadata of ready media, without file contents. Then open
+**Image report** and start a scan.
+
+## Why it is read-only
+
+Optimizing an image means replacing its file, and EmDash has no way yet for a plugin to do that
+safely:
+
+- Replacing overwrites the file at the same storage key. The original is gone, so a bad result cannot
+  be undone.
+- An editor's change made at the same moment can be overwritten, or overwrite the optimized file,
+  without either side noticing.
+- Sandboxed plugins cannot replace a file at all: their media access covers reading, uploading a new
+  item, deleting, and editing alt text, captions and focal points.
+
+So the plugin reports and leaves every image as it is.
+
+**In-place optimization is planned.** It will be added once EmDash can replace an image while
+keeping its original and refusing conflicting changes. That support has been
+[proposed to the EmDash project](https://github.com/emdash-cms/emdash/discussions/3740); this
+repository's [host patches](https://github.com/vercoapp/verco-plugins/blob/main/host/emdash/patches/README.md) are a working pilot of it.
 
 ## What it checks
 
