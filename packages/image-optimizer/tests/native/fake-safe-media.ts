@@ -15,6 +15,10 @@
  *   operation on the same item, byte for byte, and retains the bytes it replaces.
  * - Ownership: `operation()` answers only the caller that started an operation, and another caller
  *   cannot reuse its ID.
+ * - Private read (`readOriginal`, unless `readOriginal: false`): the bytes of an original retained
+ *   by an operation on the same media item, verified against its digest and recorded size, refused
+ *   over `maxBytes` (default 10 MiB, at most 16 MiB) before reading. Never writes, never publishes,
+ *   never returns a URL. Only `ORIGINAL_UNREADABLE` is retryable.
  *
  * Fault injection simulates a process that stops after the host recorded an operation, and a
  * response lost after the host published.
@@ -25,6 +29,8 @@ import sharp from 'sharp';
 
 import type {
   PublishedReceipt,
+  ReadOriginalRefusal,
+  ReadOriginalResult,
   RejectedReceipt,
   RestorableOriginal,
   SafeMediaAccess,
@@ -77,20 +83,30 @@ interface Operation {
 type Fault = 'after-intent' | 'after-publish' | 'unreachable-after-publish';
 
 const IDENTIFIER = /^[A-Za-z0-9._:-]{1,128}$/;
+/** The host's default and largest private read, as for `ctx.media.readBytes`. */
+const READ_DEFAULT_BYTES = 10 * 1024 * 1024;
+const READ_MAX_BYTES = 16 * 1024 * 1024;
 const MIME: Record<string, string> = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
 
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
 export function fakeSafeMedia(
   library: FakeMedia[],
-  options: { profile?: Record<string, string>; protocol?: number; maxBytes?: number } = {},
+  options: { profile?: Record<string, string>; protocol?: number; maxBytes?: number; readOriginal?: boolean } = {},
 ) {
   const revisions = new Map<string, Revision>();
   const active = new Map<string, string>();
-  const originals = new Map<string, { bytes: Uint8Array; mimeType: string }>();
+  /** Retained originals by digest, with the size recorded when they were retained. */
+  const originals = new Map<string, { bytes: Uint8Array | null; mimeType: string; size: number }>();
   const operations = new Map<string, Operation>();
   const publications: Array<{ mediaId: string; operationId: string; kind: string }> = [];
-  const calls = { support: 0, replace: 0, restore: 0 };
+  const calls = { support: 0, replace: 0, restore: 0, readOriginal: 0 };
+  /** Every private read, with the limit it asked for. */
+  const reads: Array<{ mediaId: string; sha256: string; maxBytes: number | undefined }> = [];
+  /** Refusals `readOriginal` returns next, one per call, before anything else. */
+  const readRefusals: string[] = [];
+  /** Changes what the next successful `readOriginal` answers, as a misbehaving host would. */
+  let readTamper: ((result: ReadOriginalResult & { ok: true }) => ReadOriginalResult) | undefined;
   const faults: Fault[] = [];
   /** Called after a replace publishes, before it answers; a test can hold the answer back. */
   let afterPublish: ((operationId: string) => Promise<void>) | undefined;
@@ -201,7 +217,9 @@ export function fakeSafeMedia(
     const digest = sha(source.bytes);
     if (source.sha256 !== null && source.sha256 !== digest) return null;
     source.sha256 = digest;
-    if (!originals.has(digest)) originals.set(digest, { bytes: Uint8Array.from(source.bytes), mimeType: source.mimeType });
+    if (!originals.has(digest)) {
+      originals.set(digest, { bytes: Uint8Array.from(source.bytes), mimeType: source.mimeType, size: source.bytes.byteLength });
+    }
     return digest;
   }
 
@@ -329,7 +347,7 @@ export function fakeSafeMedia(
         const current = activeRevision(request.mediaId);
         if (!current || current.id !== request.expectedRevisionId) return finish(operation, 'CONFLICT');
         const original = originals.get(originalSha256)!;
-        if (sha(original.bytes) !== originalSha256) return finish(operation, 'ORIGINAL_UNAVAILABLE');
+        if (!original.bytes || sha(original.bytes) !== originalSha256) return finish(operation, 'ORIGINAL_UNAVAILABLE');
         if (original.mimeType !== current.mimeType) return finish(operation, 'WRONG_FORMAT');
         const replaced = retain(current);
         if (!replaced) return finish(operation, 'SOURCE_CHANGED');
@@ -348,7 +366,7 @@ export function fakeSafeMedia(
           const original = originals.get(digest)!;
           result.push({
             sha256: digest,
-            size: original.bytes.byteLength,
+            size: original.size,
             mimeType: original.mimeType,
             sourceRevisionId: operation.expectedRevisionId,
             retainedByOperationId: operation.operationId,
@@ -359,6 +377,47 @@ export function fakeSafeMedia(
         }
         return result;
       },
+
+      ...(options.readOriginal === false
+        ? {}
+        : {
+            async readOriginal(mediaId: string, sha256: string, readOptions?: { maxBytes?: number }): Promise<ReadOriginalResult> {
+              calls.readOriginal += 1;
+              reads.push({ mediaId, sha256, maxBytes: readOptions?.maxBytes });
+              const refuse = (code: ReadOriginalRefusal): ReadOriginalResult => ({
+                ok: false,
+                code,
+                message: `refused: ${code}`,
+                retryable: code === 'ORIGINAL_UNREADABLE',
+              });
+              const injected = readRefusals.shift();
+              if (injected) return refuse(injected as ReadOriginalRefusal);
+              const maxBytes = readOptions?.maxBytes ?? READ_DEFAULT_BYTES;
+              if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > READ_MAX_BYTES) return refuse('INVALID_REQUEST');
+              if (typeof mediaId !== 'string' || !mediaId || mediaId.length > 128 || !/^[0-9a-f]{64}$/.test(sha256)) {
+                return refuse('INVALID_REQUEST');
+              }
+              if (!item(mediaId) || !active.has(mediaId)) return refuse('MEDIA_UNAVAILABLE');
+              // Only an original retained by an operation on this media item.
+              if (!retaining(mediaId).some((operation) => operation.originalSha256 === sha256)) return refuse('NO_ORIGINAL');
+              const original = originals.get(sha256);
+              if (!original) return refuse('NO_ORIGINAL');
+              if (original.size > maxBytes) return refuse('TOO_LARGE');
+              if (!original.bytes) return refuse('ORIGINAL_MISSING');
+              if (original.bytes.byteLength !== original.size || sha(original.bytes) !== sha256) return refuse('ORIGINAL_CORRUPT');
+              const result = {
+                ok: true as const,
+                mediaId,
+                sha256,
+                mimeType: original.mimeType,
+                size: original.size,
+                bytes: Uint8Array.from(original.bytes),
+              };
+              const tamper = readTamper;
+              readTamper = undefined;
+              return tamper ? tamper(result) : result;
+            },
+          }),
 
       async operation(mediaId, operationId) {
         if (lookupFails) {
@@ -406,7 +465,28 @@ export function fakeSafeMedia(
     /** Damages a retained original, as a storage fault would. */
     damageOriginal(sha256: string) {
       const original = originals.get(sha256)!;
-      original.bytes = Uint8Array.from([...original.bytes.subarray(0, 10), 0]);
+      original.bytes = Uint8Array.from([...original.bytes!.subarray(0, 10), 0]);
+    },
+    /** Deletes a retained original's file while its record stays, as a lost storage object would. */
+    loseOriginal(sha256: string) {
+      originals.get(sha256)!.bytes = null;
+    },
+    /** Forgets a retained original entirely, record and file, as pruning does. */
+    pruneOriginal(sha256: string) {
+      originals.delete(sha256);
+    },
+    reads,
+    /** Makes the next `readOriginal` calls refuse with these codes, in order. */
+    refuseReads(...codes: string[]) {
+      readRefusals.push(...codes);
+    },
+    /** Changes the next successful `readOriginal` answer. */
+    tamperNextRead(tamper: (result: ReadOriginalResult & { ok: true }) => ReadOriginalResult) {
+      readTamper = tamper;
+    },
+    /** The digests of the bytes of every revision the item has had, in the order they became active. */
+    history(mediaId: string): string[] {
+      return [...revisions.values()].filter((revision) => revision.mediaId === mediaId).map((revision) => sha(revision.bytes));
     },
     /** Ends operations left open, as the host's reconciliation does after its grace period. */
     reconcile() {

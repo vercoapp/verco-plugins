@@ -110,6 +110,10 @@ export async function startPilot(root: string, qualifiedProfiles: Array<Record<s
       const result = await runtime.hooks.invokeCronHook('image-optimizer', { name, scheduledAt: new Date().toISOString() });
       expect(result.success, String(result.error)).toBe(true);
     },
+    /** The host's safe-media operations on a media item, read from its database. */
+    operations: (mediaId: string) => rows<HostOperation>(runtime.db, '_emdash_media_operations', mediaId),
+    /** The host's revisions of a media item, read from its database. */
+    revisions: (mediaId: string) => rows<HostRevision>(runtime.db, '_emdash_media_revisions', mediaId),
     async served(key: string): Promise<Uint8Array> {
       const { body } = await runtime.storage!.download(key);
       return new Uint8Array(await new Response(body).arrayBuffer());
@@ -118,3 +122,29 @@ export async function startPilot(root: string, qualifiedProfiles: Array<Record<s
 }
 
 export type Pilot = Awaited<ReturnType<typeof startPilot>>;
+
+export interface HostOperation {
+  operation_id: string;
+  kind: string;
+  state: string;
+  expected_revision_id: string;
+  candidate_revision_id: string | null;
+  candidate_sha256: string;
+  original_sha256: string | null;
+}
+
+export interface HostRevision {
+  id: string;
+  kind: string;
+  sha256: string | null;
+}
+
+interface Selectable {
+  selectFrom(table: string): {
+    selectAll(): { where(column: string, op: '=', value: string): { execute(): Promise<unknown[]> } };
+  };
+}
+
+async function rows<T>(db: unknown, table: string, mediaId: string): Promise<T[]> {
+  return (await (db as Selectable).selectFrom(table).selectAll().where('media_id', '=', mediaId).execute()) as T[];
+}

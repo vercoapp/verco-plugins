@@ -88,6 +88,23 @@ export interface RestorableOriginal {
   retainedAt: string | null;
 }
 
+/** Why the host refused to read a retained original. Only `ORIGINAL_UNREADABLE` is retryable. */
+export type ReadOriginalRefusal =
+  | 'INVALID_REQUEST'
+  | 'MEDIA_UNAVAILABLE'
+  | 'NO_ORIGINAL'
+  | 'TOO_LARGE'
+  | 'ORIGINAL_MISSING'
+  | 'ORIGINAL_CORRUPT'
+  | 'ORIGINAL_UNREADABLE';
+
+export type ReadOriginalResult =
+  | { ok: true; mediaId: string; sha256: string; mimeType: string; size: number; bytes: Uint8Array }
+  | { ok: false; code: ReadOriginalRefusal; message: string; retryable: boolean };
+
+/** The host's default and largest read: the same limits as `ctx.media.readBytes`. */
+export const READ_ORIGINAL_MAX_BYTES = 16 * 1024 * 1024;
+
 export interface SafeMediaOperationStatus {
   state: string;
   kind: string;
@@ -101,6 +118,12 @@ export interface SafeMediaAccess {
   restore(request: SafeMediaRestoreRequest): Promise<SafeMediaResult>;
   /** Newest first. */
   listRestorableOriginals(mediaId: string): Promise<RestorableOriginal[]>;
+  /**
+   * The bytes of an original retained for this media item, verified by the host against `sha256`.
+   * Read-only: nothing is published or recorded, and no URL is returned. Absent on a host without
+   * it (one that offers safe media but not this read).
+   */
+  readOriginal?(mediaId: string, sha256: string, options?: { maxBytes?: number }): Promise<ReadOriginalResult>;
   /** Null for unknown operation IDs and for operations another caller started. */
   operation(mediaId: string, operationId: string): Promise<SafeMediaOperationStatus | null>;
 }

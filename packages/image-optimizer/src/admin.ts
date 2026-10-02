@@ -132,7 +132,8 @@ export interface AppliedRecord {
   restoredAt?: string;
   /**
    * Files the host retains because of this plugin's operations on the image, by SHA-256: the
-   * original an apply replaced, and the optimized file a restore replaced. Absent in older records.
+   * original an apply replaced, and the optimized file a restore or re-optimization replaced. Absent
+   * in older records.
    */
   retained?: Record<string, number>;
 }
@@ -206,7 +207,10 @@ type ActionBase = {
   action: 'apply' | 'restore';
   mediaId: string;
   filename: string | null;
-  /** Apply only: the image was first restored to its original, to optimize it under new settings. */
+  /**
+   * Apply only: the image was already optimized under other settings, so the retained original was
+   * read privately and processed instead of the active bytes. The original is never made active.
+   */
   reoptimized?: boolean;
 };
 
@@ -670,7 +674,7 @@ const ACTION_TITLES: Record<ActionOutcome['outcome'], string> = {
 function actionBlocks(action: ActionOutcome, locale: string): Block[] {
   const name = action.filename ?? 'The image';
   const title = `${name}: ${ACTION_TITLES[action.outcome]}`;
-  const reoptimized = action.reoptimized ? ' It was first restored to its retained original, so the new settings start from the original.' : '';
+  const reoptimized = action.reoptimized ? ' The new settings started from the retained original, which was read privately and never made active.' : '';
   switch (action.outcome) {
     case 'optimized':
       return [
@@ -751,7 +755,7 @@ export function accountingBlocks(accounting: StorageAccounting, locale: string):
     },
     {
       type: 'context',
-      text: 'The source reduction makes pages lighter to deliver. It is not a storage saving: the host keeps every original this plugin replaced, and every optimized file a restore replaced, until they are pruned.',
+      text: 'The source reduction makes pages lighter to deliver. It is not a storage saving: the host keeps every original this plugin replaced, and every optimized file a restore or re-optimization replaced, until they are pruned.',
     },
   ];
 }

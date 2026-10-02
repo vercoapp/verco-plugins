@@ -22,7 +22,7 @@ import {
 } from '../../src/bulk.ts';
 import { SCAN_STATE_KEY, type ScanRun, type StoredResult } from '../../src/job.ts';
 import { MEASURED_TICK_WALL_MS } from '../../src/measure.ts';
-import { APPLIED_PREFIX, storageAccounting } from '../../src/mutations.ts';
+import { APPLIED_PREFIX, parseOperationId, storageAccounting } from '../../src/mutations.ts';
 import { createPlugin, CRON_HOOK_TIMEOUT_MS } from '../../src/native.ts';
 import { ImageProcessorError, type ImageProcessor } from '../../src/processor/contract.ts';
 import { createLocalProcessor } from '../../src/processor/local.ts';
@@ -521,6 +521,65 @@ describe('controls', () => {
     await s.drain();
     expect(s.item(started.run.runId, 'a')).toMatchObject({ state: 'optimized' });
     expect(s.run(started.run.runId)).toMatchObject({ status: 'complete' });
+  });
+
+  it('never makes the original active when a re-optimization run is paused before submitting', async () => {
+    let pause = false;
+    let s: BulkSite;
+    const pausing: ImageProcessor = {
+      capabilities: () => shared.capabilities(),
+      async process(request) {
+        if (pause) await s.route('bulk-pause');
+        return shared.process(request);
+      },
+    };
+    s = site([heavy('a')], { processor: pausing });
+    s.seedMeasured(['a']);
+    const first = await start(s);
+    if (!first.ok) throw new Error(first.message);
+    await s.drain();
+    const optimized = sha256(s.media('a')!.bytes!);
+    expect(s.safe.history('a')).toEqual([sha256(heavies[0]!), optimized]);
+
+    s.host.settings.set('preset', 'high-fidelity');
+    pause = true;
+    const again = await start(s, { mediaIds: ['a'] });
+    if (!again.ok) throw new Error(again.message);
+    await s.tick();
+    pause = false;
+    const item = s.item(again.run.runId, 'a')!;
+    // Paused with the output staged: the optimized image is still active, the original never was.
+    expect(s.safe.history('a')).toEqual([sha256(heavies[0]!), optimized]);
+    expect(item).toMatchObject({ state: 'ready_to_commit', leaseOwner: null });
+    expect(parseOperationId(item.operationId!)).toMatchObject({ kind: 'reopt', originalSha256: sha256(heavies[0]!) });
+    expect(s.safe.calls.restore).toBe(0);
+    expect(await s.staging.list()).toEqual([item.operationId]);
+
+    await s.route('bulk-resume');
+    await s.drain();
+    expect(s.item(again.run.runId, 'a')).toMatchObject({ state: 'optimized', operationId: item.operationId });
+    const reoptimized = sha256(s.media('a')!.bytes!);
+    expect(s.safe.history('a')).toEqual([sha256(heavies[0]!), optimized, reoptimized]);
+    expect(s.safe.reads).toHaveLength(1);
+    expect(s.safe.calls.restore).toBe(0);
+  });
+
+  it('retries a re-optimization whose original the host could not read just now, and records refusals per item', async () => {
+    const s = site([heavy('a', 0), heavy('b', 1)]);
+    s.seedMeasured(['a', 'b']);
+    const first = await start(s);
+    if (!first.ok) throw new Error(first.message);
+    await s.drain();
+    s.host.settings.set('preset', 'high-fidelity');
+    s.safe.loseOriginal(sha256(heavies[1]!));
+    s.safe.refuseReads('ORIGINAL_UNREADABLE');
+    const again = await start(s, { mediaIds: ['a', 'b'] });
+    if (!again.ok) throw new Error(again.message);
+    await s.drain();
+    const items = Object.fromEntries(s.items(again.run.runId).map((item) => [item.mediaId, item]));
+    expect(items.a).toMatchObject({ state: 'optimized', attempts: 2 });
+    expect(items.b).toMatchObject({ state: 'failed', code: 'original-missing' });
+    expect(s.safe.calls.restore).toBe(0);
   });
 
   it('restores a selection with an outcome per image: restored, missing original, conflict', async () => {

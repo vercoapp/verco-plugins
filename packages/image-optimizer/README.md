@@ -140,11 +140,19 @@ imageOptimizerPlugin({
   someone else after the optimization, since restoring would overwrite that change, and it does not
   restore other callers' replacements. The host's own restore keeps working without the plugin.
 - **Changing the preset or GPS setting** and applying again starts from the original, never from the
-  earlier output. The host offers no way to read a retained original without publishing it, so the
-  plugin first restores the original (fenced like any restore), then re-encodes the restored bytes,
-  checked against the original's digest. If the new output does not save enough, the original stays.
+  earlier output. The plugin reads the retained original privately from the host (no URL, nothing
+  published), checks it against the original's SHA-256 digest and size, re-encodes it, and replaces
+  the optimized image with the new output, fenced on the optimized revision. The original is never
+  made active on the way, and the host retains the replaced optimized file as well. If the new output
+  does not save enough, the optimized image stays and nothing is recorded. On a host without that
+  private read, or when the host refuses it (the original is no longer kept, its file is missing or
+  damaged, or it is over the read limit of 16 MiB), nothing changes and the outcome says why: the
+  plugin neither re-encodes its own lossy output nor restores the original to read it. Restore the
+  image first to optimize it from the original there. A read the host could not do just now is
+  retried like other temporary failures.
 - **Retries.** Each host operation has an ID derived from the media ID, the source revision, the
-  settings that determine the output, and the processor version, so retrying after a lost response
+  settings that determine the output, and the processor version (and, for a re-optimization, which is
+  told apart from a first optimization, the original's digest), so retrying after a lost response
   returns the host's earlier receipt instead of changing the image twice. The output waits for the
   host in a private staging directory (by default under the system temporary directory, one per site;
   option `stagingDirectory`), so a retry after the site process stopped submits the same bytes. Staged
@@ -193,7 +201,7 @@ the host with restarts, overlapping workers, editor changes, deletions and lost 
 - **Accounting.** The report keeps three numbers apart. *Source reduction (gross)*: how much smaller
   the files of the images optimized now are. *Originals retained*: the files the host keeps because of
   this plugin's operations, the originals that applies replaced and the optimized files that restores
-  replaced, counted once per distinct file. *Net storage change*: retained bytes minus the reduction.
+  and re-optimizations replaced, counted once per distinct file. *Net storage change*: retained bytes minus the reduction.
   While originals are retained this is an **increase**: an optimized image costs its new file on top of
   its original. The reduction makes pages lighter to deliver; it is not a storage saving. The numbers
   come from the host's receipts as the plugin recorded them; the host can prune originals without the

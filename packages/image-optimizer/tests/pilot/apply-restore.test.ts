@@ -89,7 +89,7 @@ describe.skipIf(!core)('the native edition on the patched host', () => {
     expect(kept(await media.findById(id))).toEqual(before);
   });
 
-  it('re-optimizes from the retained original when the preset changes', async () => {
+  it('re-optimizes from the privately read original when the preset changes, never making it active', async () => {
     const { id, original, media, setSetting } = await start([LOCAL_PROFILE], '01HZPILOTREOPT.jpg');
     const before = kept(await media.findById(id));
     const first = await route('apply', id);
@@ -104,6 +104,26 @@ describe.skipIf(!core)('the native edition on the patched host', () => {
     expect(fidelity).not.toBe(balanced);
     expect(fidelity).not.toBe(sha(original));
     expect(kept(await media.findById(id))).toEqual(before);
+
+    // The host's own records: two replacements and no restore. The re-optimization was fenced on the
+    // balanced revision the first one published, so no revision came between them, and the only
+    // revision with the original's bytes is the one the first replacement started from.
+    const operations = await site!.operations(id);
+    expect(operations.map(({ kind, state }) => [kind, state])).toEqual([
+      ['replace', 'published'],
+      ['replace', 'published'],
+    ]);
+    const firstOperation = operations.find(({ operation_id }) => operation_id.startsWith('imgopt.replace.'))!;
+    const reoptimization = operations.find(({ operation_id }) => operation_id.startsWith(`imgopt.reopt.`))!;
+    expect(reoptimization.operation_id).toContain(sha(original));
+    expect(firstOperation).toMatchObject({ candidate_sha256: balanced, original_sha256: sha(original) });
+    expect(reoptimization).toMatchObject({
+      expected_revision_id: firstOperation.candidate_revision_id,
+      candidate_sha256: fidelity,
+      original_sha256: balanced,
+    });
+    const revisions = await site!.revisions(id);
+    expect(revisions.filter(({ sha256 }) => sha256 === sha(original)).map(({ id }) => id)).toEqual([firstOperation.expected_revision_id]);
 
     expect(await route('restore', id)).toMatchObject({ outcome: 'restored', sha256: sha(original) });
     expect(sha(await served('01HZPILOTREOPT.jpg'))).toBe(sha(original));

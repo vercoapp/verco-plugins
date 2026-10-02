@@ -16,8 +16,10 @@ import {
   MIN_APPLY_SAVING_BYTES,
   parseOperationId,
   policyKey,
+  reoptimizeOperationId,
   replaceOperationId,
   restoreOperationId,
+  storageAccounting,
   type Policy,
 } from '../../src/mutations.ts';
 import { createNativePlugin, createPlugin } from '../../src/native.ts';
@@ -70,7 +72,7 @@ afterEach(async () => {
 
 interface SetupOptions {
   /** `null`: the host offers no safe-media access. */
-  safe?: { profile?: Record<string, string>; protocol?: number } | null;
+  safe?: { profile?: Record<string, string>; protocol?: number; readOriginal?: boolean } | null;
   /** Defaults to the profile the fake host reports. */
   qualifiedProfiles?: Array<Record<string, string>>;
   processor?: ImageProcessor;
@@ -474,36 +476,258 @@ describe('restore', () => {
 });
 
 describe('re-optimization from the retained original', () => {
-  it('processes the original, not its own earlier output, when the preset changes', async () => {
-    const site = setup();
+  /** Optimizes `heavy` under the default preset, then switches the preset. */
+  async function optimizedThenChanged(options: SetupOptions = {}) {
+    const site = setup(options);
     const first = await site.apply('heavy');
     if (first.outcome !== 'optimized') throw new Error(first.outcome);
-    const optimized = Buffer.from(site.media('heavy').bytes!);
+    const optimized = sha256(site.media('heavy').bytes!);
+    const record = (await site.record('heavy'))!;
     site.host.settings.set('preset', 'high-fidelity');
+    return { site, optimized, record };
+  }
+
+  /** Nothing changed since the first optimization: the optimized image is active, nothing was read or published. */
+  async function unchanged(site: ReturnType<typeof setup>, optimized: string, record: AppliedRecord) {
+    expect(site.safe.history('heavy')).toEqual([sha256(heavy), optimized]);
+    expect(site.safe.publications).toHaveLength(1);
+    expect(site.safe.calls.restore).toBe(0);
+    // Only the first optimization's input was processed: never the optimized bytes.
+    expect(site.inputs.map(sha256)).toEqual([sha256(heavy)]);
+    expect(await site.record('heavy')).toEqual(record);
+    expect(await site.staging.list()).toEqual([]);
+  }
+
+  it('processes the original privately and replaces the optimized image; the original never becomes active', async () => {
+    const { site, optimized } = await optimizedThenChanged();
 
     const outcome = await site.apply('heavy');
 
-    expect(outcome).toMatchObject({ outcome: 'optimized', reoptimized: true, inputBytes: heavy.byteLength });
+    expect(outcome).toMatchObject({ outcome: 'optimized', reoptimized: true, replayed: false, inputBytes: heavy.byteLength });
+    const reoptimized = sha256(site.media('heavy').bytes!);
+    // Optimized, then re-optimized: no revision with the original's bytes in between.
+    expect(site.safe.history('heavy')).toEqual([sha256(heavy), optimized, reoptimized]);
+    expect(reoptimized).not.toBe(optimized);
+    expect(site.safe.publications.map(({ kind }) => kind)).toEqual(['replace', 'replace']);
+    expect(site.safe.calls.restore).toBe(0);
     expect(site.inputs.map(sha256)).toEqual([sha256(heavy), sha256(heavy)]);
-    expect(site.inputs.map(sha256)).not.toContain(sha256(optimized));
-    expect(site.safe.publications.map(({ kind }) => kind)).toEqual(['replace', 'restore', 'replace']);
+    // The read asked for the original by digest, within the processor's and the host's limits.
+    expect(site.safe.reads).toEqual([{ mediaId: 'heavy', sha256: sha256(heavy), maxBytes: 16 * 1024 * 1024 }]);
+
     const record = await site.record('heavy');
-    expect(record).toMatchObject({ state: 'optimized', preset: 'high-fidelity', originalSha256: sha256(heavy) });
-    expect(parseOperationId(record!.operationId)).toEqual({ kind: 'replace', key: policyKey(policyFor('high-fidelity')) });
+    expect(record).toMatchObject({ state: 'optimized', preset: 'high-fidelity', originalSha256: sha256(heavy), inputBytes: heavy.byteLength });
+    expect(parseOperationId(record!.operationId)).toEqual({
+      kind: 'reopt',
+      key: policyKey(policyFor('high-fidelity')),
+      originalSha256: sha256(heavy),
+    });
+    // Fenced on the optimized revision that was active.
+    expect(record!.sourceRevisionId).toBe(site.safe.operations.get(`heavy\u0000${record!.operationId}`)!.expectedRevisionId);
 
     // The original is still the one restore puts back.
     expect(await site.restore('heavy')).toMatchObject({ outcome: 'restored', sha256: sha256(heavy) });
     expect(sha256(site.media('heavy').bytes!)).toBe(sha256(heavy));
   });
 
-  it('leaves the original active when the new settings do not save enough', async () => {
-    const site = setup();
+  it('keeps starting from the same original over repeated changes, and counts each retained file once', async () => {
+    const { site, optimized } = await optimizedThenChanged();
     await site.apply('heavy');
+    const fidelity = sha256(site.media('heavy').bytes!);
+    const fidelityBytes = site.media('heavy').bytes!.byteLength;
+    site.host.settings.set('preset', 'balanced');
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'optimized', reoptimized: true, inputBytes: heavy.byteLength });
+    // Deterministic: the same original under the same policy gives the same file again.
+    expect(sha256(site.media('heavy').bytes!)).toBe(optimized);
+    const balancedBytes = site.media('heavy').bytes!.byteLength;
     site.host.settings.set('preset', 'high-fidelity');
-    site.host.settings.set('minSavingsPercent', 95);
-    expect(await site.apply('heavy')).toMatchObject({ outcome: 'skipped', reason: 'below-threshold', reoptimized: true });
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'optimized', reoptimized: true });
+
+    expect(site.safe.history('heavy')).toEqual([sha256(heavy), optimized, fidelity, optimized, fidelity]);
+    expect(site.inputs.map(sha256)).toEqual(Array(4).fill(sha256(heavy)));
+    expect(site.safe.calls.restore).toBe(0);
+
+    // The host retains the original, the balanced file and the high-fidelity file, each once,
+    // although the balanced file was replaced twice.
+    const record = (await site.record('heavy'))!;
+    expect(record.retained).toEqual({ [sha256(heavy)]: heavy.byteLength, [optimized]: balancedBytes, [fidelity]: fidelityBytes });
+    const accounting = storageAccounting([record]);
+    expect(accounting).toEqual({
+      optimized: 1,
+      grossReductionBytes: heavy.byteLength - fidelityBytes,
+      retainedOriginalBytes: heavy.byteLength + balancedBytes + fidelityBytes,
+      netStorageChangeBytes: balancedBytes + 2 * fidelityBytes,
+    });
+    const page = JSON.stringify((await site.admin({ type: 'page_load', page: '/report' })).blocks);
+    expect(page).toMatch(/"label":"Originals retained"/);
+
+    expect(await site.restore('heavy')).toMatchObject({ outcome: 'restored', sha256: sha256(heavy) });
     expect(sha256(site.media('heavy').bytes!)).toBe(sha256(heavy));
-    expect(await site.record('heavy')).toMatchObject({ state: 'restored' });
+  });
+
+  it('leaves the optimized image active and records nothing when the new settings do not save enough', async () => {
+    const { site, optimized, record } = await optimizedThenChanged();
+    site.host.settings.set('minSavingsPercent', 95);
+
+    expect(await site.apply('heavy')).toMatchObject({
+      outcome: 'skipped',
+      reason: 'below-threshold',
+      reoptimized: true,
+      inputBytes: heavy.byteLength,
+      message: expect.stringMatching(/optimized image stays active/),
+    });
+    expect(site.safe.history('heavy')).toEqual([sha256(heavy), optimized]);
+    expect(site.safe.publications).toHaveLength(1);
+    expect(site.safe.calls.restore).toBe(0);
+    expect(await site.record('heavy')).toEqual(record);
+    expect(await site.staging.list()).toEqual([]);
+  });
+
+  it('does not re-optimize on a host without the private read, and changes nothing', async () => {
+    const { site, optimized, record } = await optimizedThenChanged({ safe: { readOriginal: false } });
+
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'skipped', reason: 'reoptimize-unsupported', reoptimized: true });
+    await unchanged(site, optimized, record);
+    expect(site.safe.calls.readOriginal).toBe(0);
+    // Restore still works there.
+    expect(await site.restore('heavy')).toMatchObject({ outcome: 'restored', sha256: sha256(heavy) });
+  });
+
+  const refusals: Array<[string, Record<string, unknown>]> = [
+    ['NO_ORIGINAL', { outcome: 'failed', code: 'original-not-retained' }],
+    ['ORIGINAL_MISSING', { outcome: 'failed', code: 'original-missing' }],
+    ['ORIGINAL_CORRUPT', { outcome: 'failed', code: 'original-corrupt' }],
+    ['TOO_LARGE', { outcome: 'skipped', reason: 'original-too-large' }],
+    ['MEDIA_UNAVAILABLE', { outcome: 'failed', code: 'not-found' }],
+    ['INVALID_REQUEST', { outcome: 'failed', code: 'invalid-request' }],
+    ['ORIGINAL_UNREADABLE', { outcome: 'failed', code: 'original-unreadable', retryable: true }],
+  ];
+
+  it.each(refusals)('reports the host refusing the read with %s, and changes nothing', async (code, expected) => {
+    const { site, optimized, record } = await optimizedThenChanged();
+    site.safe.refuseReads(code);
+    const outcome = await site.apply('heavy');
+    expect(outcome).toMatchObject({ ...expected, reoptimized: true });
+    if (code !== 'ORIGINAL_UNREADABLE') expect((outcome as { retryable?: boolean }).retryable ?? false).toBe(false);
+    await unchanged(site, optimized, record);
+  });
+
+  it('reports what the host finds: a lost file, a damaged file, an original over the limit', async () => {
+    const cases: Array<[(site: ReturnType<typeof setup>) => void, Record<string, unknown>]> = [
+      [(site) => site.safe.loseOriginal(sha256(heavy)), { outcome: 'failed', code: 'original-missing' }],
+      [(site) => site.safe.damageOriginal(sha256(heavy)), { outcome: 'failed', code: 'original-corrupt' }],
+      [(site) => (site.safe.support.limits.maxBytes = heavy.byteLength - 1), { outcome: 'skipped', reason: 'original-too-large' }],
+    ];
+    for (const [fault, expected] of cases) {
+      const { site, optimized, record } = await optimizedThenChanged();
+      fault(site);
+      expect(await site.apply('heavy')).toMatchObject({ ...expected, reoptimized: true });
+      expect(site.safe.calls.readOriginal).toBe(1);
+      await unchanged(site, optimized, record);
+    }
+  });
+
+  it('does not process its own output again when the host no longer lists the original', async () => {
+    const { site, optimized, record } = await optimizedThenChanged();
+    site.safe.pruneOriginal(sha256(heavy));
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'failed', code: 'original-not-retained', reoptimized: true });
+    expect(site.safe.calls.readOriginal).toBe(0);
+    await unchanged(site, optimized, record);
+    // Under the settings it was optimized with, it is simply already optimized.
+    site.host.settings.set('preset', 'balanced');
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'skipped', reason: 'already-optimized' });
+    await unchanged(site, optimized, record);
+  });
+
+  it('reports a pruned original after a re-optimization, from the host read', async () => {
+    const { site } = await optimizedThenChanged();
+    await site.apply('heavy');
+    const reoptimized = sha256(site.media('heavy').bytes!);
+    const record = (await site.record('heavy'))!;
+    site.safe.pruneOriginal(sha256(heavy));
+    site.host.settings.set('preset', 'balanced');
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'failed', code: 'original-not-retained', reoptimized: true });
+    expect(site.safe.calls.readOriginal).toBe(2);
+    expect(site.safe.history('heavy').at(-1)).toBe(reoptimized);
+    expect(site.inputs).toHaveLength(2);
+    expect(site.safe.publications).toHaveLength(2);
+    expect(await site.record('heavy')).toEqual(record);
+  });
+
+  it('retries a read the host could not do just now', async () => {
+    const { site, optimized } = await optimizedThenChanged();
+    site.safe.refuseReads('ORIGINAL_UNREADABLE');
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'failed', code: 'original-unreadable', retryable: true });
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'optimized', reoptimized: true });
+    expect(site.safe.history('heavy')).toHaveLength(3);
+    expect(site.safe.history('heavy').slice(0, 2)).toEqual([sha256(heavy), optimized]);
+  });
+
+  it('never processes bytes the host returns that are not the original', async () => {
+    const tampering: Array<(result: { bytes: Uint8Array; size: number; sha256: string; mediaId: string }) => object> = [
+      // Other bytes under the original's digest: of another size, and of the same size.
+      (result) => ({ ...result, bytes: Uint8Array.from(light), size: light.byteLength }),
+      (result) => ({ ...result, bytes: result.bytes.map((byte, index) => (index === 1000 ? byte ^ 1 : byte)) }),
+      // The right bytes, but the answer names another original or item.
+      (result) => ({ ...result, sha256: sha256(light) }),
+      (result) => ({ ...result, mediaId: 'light' }),
+      // A size that does not match the bytes.
+      (result) => ({ ...result, size: result.size - 1 }),
+    ];
+    for (const tamper of tampering) {
+      const { site, optimized, record } = await optimizedThenChanged();
+      site.safe.tamperNextRead((result) => tamper(result) as typeof result);
+      expect(await site.apply('heavy')).toMatchObject({ outcome: 'failed', code: 'original-mismatch', reoptimized: true });
+      await unchanged(site, optimized, record);
+    }
+  });
+
+  it('never processes an original over the limit it asked for, or of another size than the host lists', async () => {
+    const overLimit = await optimizedThenChanged();
+    const safe = (overLimit.site.host.ctx.media as unknown as { safe: Required<SafeMediaAccess> }).safe;
+    const read = safe.readOriginal.bind(safe);
+    // A host that ignores the limit.
+    safe.readOriginal = (mediaId, digest) => read(mediaId, digest);
+    overLimit.site.safe.support.limits.maxBytes = heavy.byteLength - 1;
+    expect(await overLimit.site.apply('heavy')).toMatchObject({ outcome: 'failed', code: 'original-mismatch' });
+    await unchanged(overLimit.site, overLimit.optimized, overLimit.record);
+
+    const resized = await optimizedThenChanged();
+    const access = (resized.site.host.ctx.media as unknown as { safe: SafeMediaAccess }).safe;
+    const list = access.listRestorableOriginals.bind(access);
+    access.listRestorableOriginals = async (mediaId) =>
+      (await list(mediaId)).map((entry) => (entry.sha256 === sha256(heavy) ? { ...entry, size: entry.size + 1 } : entry));
+    expect(await resized.site.apply('heavy')).toMatchObject({ outcome: 'failed', code: 'original-mismatch' });
+    await unchanged(resized.site, resized.optimized, resized.record);
+  });
+
+  it('answers a lost response to a re-optimization from the host record, without publishing twice', async () => {
+    const { site } = await optimizedThenChanged();
+    site.safe.failNext('after-publish');
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'optimized', reoptimized: true, replayed: true, inputBytes: heavy.byteLength });
+    expect(site.safe.publications).toHaveLength(2);
+    expect(await site.record('heavy')).toMatchObject({ preset: 'high-fidelity', originalSha256: sha256(heavy) });
+    expect(await site.staging.list()).toEqual([]);
+  });
+
+  it('completes a re-optimization whose outcome was unknown from the host receipt, without reading or processing again', async () => {
+    const { site, optimized } = await optimizedThenChanged();
+    const optimizedBytes = site.media('heavy').bytes!.byteLength;
+    site.safe.failNext('unreachable-after-publish');
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'uncertain', reoptimized: true });
+    const reoptimized = sha256(site.media('heavy').bytes!);
+    expect(site.safe.history('heavy')).toEqual([sha256(heavy), optimized, reoptimized]);
+
+    // The record still names the first optimization; the host's receipt completes it.
+    const outcome = await site.apply('heavy');
+    expect(outcome).toMatchObject({ outcome: 'optimized', reoptimized: true, replayed: true, inputBytes: heavy.byteLength });
+    expect(site.safe.reads).toHaveLength(1);
+    expect(site.inputs).toHaveLength(2);
+    expect(site.safe.publications).toHaveLength(2);
+    expect(site.safe.history('heavy')).toEqual([sha256(heavy), optimized, reoptimized]);
+    const record = await site.record('heavy');
+    expect(record).toMatchObject({ state: 'optimized', preset: 'high-fidelity', originalSha256: sha256(heavy), inputBytes: heavy.byteLength });
+    expect(record!.retained).toEqual({ [sha256(heavy)]: heavy.byteLength, [optimized]: optimizedBytes });
+    expect(await site.apply('heavy')).toMatchObject({ outcome: 'skipped', reason: 'already-optimized' });
   });
 });
 
@@ -525,6 +749,30 @@ describe('operation IDs', () => {
     expect(restoreOperationId({ mediaId: 'm1', expectedRevisionId: 'r1', originalSha256: 'a'.repeat(64) })).toMatch(
       /^imgopt\.restore\./,
     );
+  });
+
+  it('tell a re-optimization from a first optimization, deterministically, within the host limit', () => {
+    const original = 'a'.repeat(64);
+    const identity = { mediaId: 'm1', sourceRevisionId: 'r1', originalSha256: original, policy: policyFor('balanced') };
+    const id = reoptimizeOperationId(identity);
+    expect(reoptimizeOperationId({ ...identity })).toBe(id);
+    expect(id).not.toBe(replaceOperationId(identity));
+    expect(parseOperationId(id)).toEqual({ kind: 'reopt', key: policyKey(identity.policy), originalSha256: original });
+    expect(parseOperationId(replaceOperationId(identity))).toEqual({ kind: 'replace', key: policyKey(identity.policy) });
+    for (const attempt of [1, 2, 3]) {
+      const attemptId = reoptimizeOperationId(identity, attempt);
+      expect(attemptId).toMatch(/^[A-Za-z0-9._:-]{1,128}$/);
+      expect(parseOperationId(attemptId)).toMatchObject({ kind: 'reopt', originalSha256: original });
+    }
+    const variants = [
+      { ...identity, mediaId: 'm2' },
+      { ...identity, sourceRevisionId: 'r2' },
+      { ...identity, originalSha256: 'b'.repeat(64) },
+      { ...identity, policy: policyFor('high-fidelity') },
+      { ...identity, policy: { ...policyFor('balanced'), processorVersion: 'other' } },
+    ];
+    for (const variant of variants) expect(reoptimizeOperationId(variant)).not.toBe(id);
+    expect(parseOperationId(`${id.slice(0, -1)}g`)).toBeNull();
   });
 });
 
