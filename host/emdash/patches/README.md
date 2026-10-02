@@ -14,6 +14,7 @@ tree, changed files, related tests, scope and limits.
 | [`0006-byte-exact-restore.patch`](0006-byte-exact-restore.patch) | Fenced byte-exact restore of a retained original through the same journal and receipts, and `emdash/media/safe-recovery`, a recovery entry point that works from the database and storage directories without the runtime or any plugin. |
 | [`0007-native-safe-media-access.patch`](0007-native-safe-media-access.patch) | `ctx.media.safe` for native plugins that declare the native-only capability `media:bytes:replace` on a `safeMedia` host: support discovery, the active revision, same-geometry replace, restore, restorable originals and operation status, attributed to the plugin. Sandboxed-format plugins, in a sandbox or in-process, cannot declare the capability. |
 | [`0008-read-retained-original.patch`](0008-read-retained-original.patch) | `ctx.media.safe.readOriginal`: the same native plugins read the digest-verified bytes of an original retained for a media item, without restoring it, within the `ctx.media.readBytes` limits. Read-only. |
+| [`0009-decoder-process-cleanup.patch`](0009-decoder-process-cleanup.patch) | Output-validator decoder cleanup: a timed-out decode or a failing spawn observer reports only after the child is killed and reaped, and a decoder child exits when its parent dies instead of being orphaned. |
 
 Patches are cumulative and apply in order; each records the git tree it produces.
 

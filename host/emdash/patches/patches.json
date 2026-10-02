@@ -202,6 +202,21 @@
         "M\tpackages/core/tests/integration/runtime/plugin-safe-media.test.ts",
         "A\tpackages/core/tests/unit/media/safe/read-original.test.ts"
       ]
+    },
+    {
+      "name": "0009-decoder-process-cleanup.patch",
+      "tasks": [
+        "2.2"
+      ],
+      "scope": "Decoder child-process cleanup for the output validator: a timed-out decode, or a spawn observer that throws, reports only after the child has been killed and reaped, and a decoder child exits when its parent dies (IPC disconnect) instead of being orphaned. The child flushes its reply before exiting. Exercised on Node with real child processes, including a hung stub decoder whose parent is killed.",
+      "limits": "Covers the Sharp child-process decoder only. Parent death is detected through the IPC channel; a parent stopped with SIGSTOP or a child that blocks the event loop inside libvips is still bounded only by the wall-time kill. Node only; no workerd, Postgres or D1 run.",
+      "sha256": "49f44ddd3ea7071fe1e4fe8f728165598680e4ba892e54e86f376b5236c5f97b",
+      "resultingTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+      "files": [
+        "M\tpackages/core/src/media/safe/sharp-child-decoder.ts",
+        "A\tpackages/core/tests/unit/media/safe/decoder-lifecycle.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/output-validation.test.ts"
+      ]
     }
   ]
 }
