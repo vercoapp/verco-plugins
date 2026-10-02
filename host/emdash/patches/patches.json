@@ -108,6 +108,27 @@
         "M\tpackages/core/tests/unit/media/safe/replacement-service.test.ts",
         "A\tpackages/core/tests/unit/media/safe/safe-media-integration.test.ts"
       ]
+    },
+    {
+      "name": "0005-interrupted-operation-reconciliation.patch",
+      "tasks": [
+        "2.5"
+      ],
+      "scope": "Reconciliation of the staged replacement protocol through `MediaReplacementService.reconcile`: interrupted operations whose candidate is durably staged are completed through the same fenced steps (or rejected if the media changed or was deleted), operations still at intent are aborted as `INTERRUPTED`, and candidate objects, private originals and temporary files that no record needs are removed. Run after startup and on each maintenance tick when `safeMedia` is set. Exercised with a file-backed SQLite database, real local storage and simulated process death after each of the seven steps and during reconciliation itself, checking that the media is one complete, readable revision afterwards.",
+      "limits": "Node/SQLite and local storage only; the calls after startup and on maintenance ticks are wired but not exercised by a test, only the entry point they call; D1 and other storage adapters are not supported. One writing process is assumed: the locks are in-process, and work of another process is protected only by a grace period (10 minutes by default). Crash points are simulated by abandoning work in-process; there is no power-loss or filesystem-fault testing. Superseded revisions, retained originals and the journal are never pruned. Unpublished candidate revision rows are kept as records after their objects are removed.",
+      "sha256": "f4995a9ecb3c16915ccb93466361b7f6d83c11acdbe67eb46b321ffc1c39ce67",
+      "resultingTree": "0e435015b287be595081ad460db1a77016f573cd",
+      "files": [
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/emdash-runtime.ts",
+        "A\tpackages/core/src/media/safe/keyed-lock.ts",
+        "M\tpackages/core/src/media/safe/private-local.ts",
+        "M\tpackages/core/src/media/safe/private-originals.ts",
+        "A\tpackages/core/src/media/safe/reconciliation.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/runtime.ts",
+        "A\tpackages/core/tests/unit/media/safe/reconciliation.test.ts"
+      ]
     }
   ]
 }
