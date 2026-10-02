@@ -33,6 +33,7 @@
     "emdash": ">=1.1.0"
   },
   "devDependencies": {
+    "@emdash-cms/blocks": "1.1.0",
     "@emdash-cms/plugin-cli": "0.13.2",
     "@emdash-cms/plugin-test": "0.2.7",
     "emdash": "1.1.0",

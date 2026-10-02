@@ -144,6 +144,8 @@ describe('sweep', () => {
     expect(run.totals.flagged).toBe(250);
     expect(run.totals.estimatedSavingsBytes).toBe(250 * 360_000);
     expect(run.finishedAt).not.toBeNull();
+    expect(run.updatedAt > run.startedAt).toBe(true);
+    expect(run.updatedAt >= run.finishedAt!).toBe(true);
     expect(host.results.size).toBe(250);
     expect(host.results.get('m0000')).toMatchObject({
       runId: run.runId,
@@ -256,7 +258,10 @@ describe('uploads', () => {
     });
     await recordUpload(host.deps, 'new', DEFAULT_SCAN_OPTIONS);
 
+    const before = host.state()!.updatedAt;
     expect(host.state()).toMatchObject({ phase: 'cleanup', totals: { scanned: 151, flagged: 151 } });
+    await recordUpload(host.deps, 'new', DEFAULT_SCAN_OPTIONS);
+    expect(host.state()!.updatedAt > before).toBe(true);
   });
 
   it('ignores missing media and non-images', async () => {

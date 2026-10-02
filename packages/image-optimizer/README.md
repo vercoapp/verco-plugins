@@ -3,8 +3,7 @@
 A sandboxed EmDash plugin that reports images in the media library that are probably larger than they
 need to be. It is **read-only**: it never changes, replaces or deletes media.
 
-Status: in development, not published. The scanner and the scan job exist; the admin report page and
-the settings form do not yet.
+Status: in development, not published.
 
 ## What it checks
 
@@ -21,10 +20,23 @@ capability. It does not read image bytes, so every saving it reports is an **est
 Each estimate records its basis: `resize` (scaling down only) or `resize-and-reencode` (also assuming a
 typical encoding density for the same format). For PNG, BMP and TIFF only the resize is estimated. A
 finding is reported only when the estimated saving reaches both the byte and the ratio thresholds
-(default 50 KiB and 20%); the advisory findings are always reported.
+(default 50 KB and 20%); the advisory findings are always reported.
 
 GIF, SVG, HEIC and other image types are skipped, as are items with missing or invalid size or
 dimensions.
+
+## In the admin
+
+- **Image report** (a plugin page): totals, the images that could be smaller ordered by estimated
+  saving, and the skipped images with the reason each was skipped. Start a scan from here. While a
+  scan runs, the page shows how many images it has scanned and when it last made progress; refresh
+  to update it.
+- **Image savings** (a dashboard widget): the estimated saving and the number of images to review.
+- **Settings**: the largest useful edge in pixels (default 2560), and the smallest saving worth
+  reporting in KB (default 50) and as a percentage of the file (default 20).
+
+Opening the report and starting a scan require the `plugins:manage` permission. The page and widget
+are in English; numbers follow the administrator's locale.
 
 ## How a scan runs
 
@@ -39,8 +51,7 @@ scan starts are scanned on upload instead and added to the totals. When the swee
 for media deleted since the previous scan are removed. Results for media deleted after that remain
 until the next scan.
 
-Thresholds come from the plugin settings `maxDimension`, `minSavingsBytes` and `minSavingsRatio`. A
-scan keeps the values it started with.
+A scan keeps the settings it started with.
 
 ## Limits
 
@@ -49,7 +60,10 @@ scan keeps the values it started with.
 - Measuring real savings needs the image bytes and an encoder, which a sandboxed plugin does not have.
 - An upload made at the moment a scan starts can be counted twice in the totals. The stored results
   are not affected.
-- Tested in the EmDash plugin test hosts only, not yet on a deployed Node or Cloudflare site.
+- The report has no link to each image in the media library: Block Kit links can target content,
+  plugin pages and settings, but not media items.
+- Tested in the EmDash plugin test hosts only, not yet on a deployed Node or Cloudflare site, and the
+  report has not been tried with users.
 
 ## Development
 

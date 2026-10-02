@@ -38,6 +38,8 @@ export interface ScanRun {
   /** `media.list()` cursor for the next sweep page, `null` for the first. */
   cursor: string | null;
   startedAt: string;
+  /** Time of the last write to this record: progress, an upload, or completion. */
+  updatedAt: string;
   finishedAt: string | null;
   totals: ScanSummary;
 }
@@ -83,6 +85,7 @@ export function addSummaries(a: ScanSummary, b: ScanSummary): ScanSummary {
     ok: a.ok + b.ok,
     skipped,
     estimatedSavingsBytes: a.estimatedSavingsBytes + b.estimatedSavingsBytes,
+    unestimated: a.unestimated + b.unestimated,
   };
 }
 
@@ -129,6 +132,7 @@ export async function startScan(
     options,
     cursor: null,
     startedAt,
+    updatedAt: startedAt,
     finishedAt: null,
     totals: emptySummary(),
   };
@@ -148,7 +152,8 @@ export async function advanceScan(deps: ScanDeps, maxPages = PAGES_PER_TICK): Pr
   let state = await deps.kv.getVersioned<ScanRun>(SCAN_STATE_KEY);
   for (let page = 0; page < maxPages && state && state.value.phase !== 'complete'; page += 1) {
     const run = state.value;
-    const next = run.phase === 'sweep' ? await sweepPage(deps, run) : await cleanupPage(deps, run);
+    const stepped = run.phase === 'sweep' ? await sweepPage(deps, run) : await cleanupPage(deps, run);
+    const next = { ...stepped, updatedAt: deps.now().toISOString() };
     const written = await deps.kv.compareAndSet(SCAN_STATE_KEY, state.revision, next);
     if (!written.applied) return readScan(deps);
     state = { value: next, revision: written.revision };
@@ -204,7 +209,11 @@ export async function recordUpload(deps: ScanDeps, mediaId: string, defaults: Sc
     if (!state || !run) return;
 
     const totals = addSummaries(run.totals, summarizeScan([result]));
-    const written = await deps.kv.compareAndSet(SCAN_STATE_KEY, state.revision, { ...run, totals });
+    const written = await deps.kv.compareAndSet(SCAN_STATE_KEY, state.revision, {
+      ...run,
+      totals,
+      updatedAt: deps.now().toISOString(),
+    });
     if (written.applied) return;
   }
   deps.log.warn('Scan totals not updated for an upload after repeated conflicts', { mediaId });

@@ -222,6 +222,7 @@ describe('summary', () => {
         'invalid-metadata': 1,
       },
       estimatedSavingsBytes: 360_000,
+      unestimated: 1,
     });
   });
 });

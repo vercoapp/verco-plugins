@@ -23,7 +23,7 @@ export interface ScanOptions {
 
 export const DEFAULT_SCAN_OPTIONS: Readonly<ScanOptions> = Object.freeze({
   maxDimension: 2560,
-  minSavingsBytes: 50 * 1024,
+  minSavingsBytes: 50_000,
   minSavingsRatio: 0.2,
 });
 
@@ -70,6 +70,8 @@ export interface ScanSummary {
   ok: number;
   skipped: Record<SkipReason, number>;
   estimatedSavingsBytes: number;
+  /** Flagged results with only advisory findings, so no saving is included for them. */
+  unestimated: number;
 }
 
 const FORMATS: Readonly<Record<string, ImageFormat>> = {
@@ -190,7 +192,7 @@ function worthReporting(savings: number, size: number, options: ScanOptions): bo
 
 export function summarizeScan(results: Iterable<ScanResult>): ScanSummary {
   const skipped = Object.fromEntries(SKIP_REASONS.map((reason) => [reason, 0])) as Record<SkipReason, number>;
-  const summary: ScanSummary = { scanned: 0, flagged: 0, ok: 0, skipped, estimatedSavingsBytes: 0 };
+  const summary: ScanSummary = { scanned: 0, flagged: 0, ok: 0, skipped, estimatedSavingsBytes: 0, unestimated: 0 };
   for (const result of results) {
     summary.scanned += 1;
     if (result.status === 'skipped') {
@@ -199,7 +201,8 @@ export function summarizeScan(results: Iterable<ScanResult>): ScanSummary {
       summary.ok += 1;
     } else {
       summary.flagged += 1;
-      summary.estimatedSavingsBytes += result.estimate?.bytes ?? 0;
+      if (result.estimate) summary.estimatedSavingsBytes += result.estimate.bytes;
+      else summary.unestimated += 1;
     }
   }
   return summary;
