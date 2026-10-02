@@ -6,6 +6,7 @@ import type { PluginUiContext } from 'emdash/plugin';
 
 import packageJson from '../package.json';
 import type { ScanRun, StoredResult } from '../src/job.ts';
+import { BULK_STORAGE } from '../src/bulk.ts';
 import { createPlugin, imageOptimizerPlugin, PLUGIN_ID, PLUGIN_VERSION } from '../src/native.ts';
 import { editions, NATIVE_ONLY_ROUTES, type Edition } from './editions.ts';
 import { fakeHost, type FakeMedia } from './fake-host.ts';
@@ -279,12 +280,20 @@ describe('native declarations', () => {
       expect(manifest.capabilities).toEqual(['media:read']);
       expect(plugin.capabilities).toEqual([...manifest.capabilities, 'media:bytes:read']);
       expect(plugin.allowedHosts).toEqual(manifest.allowedHosts);
-      expect(plugin.storage).toEqual(manifest.storage);
+      // Plus the collections of bulk runs, which only the native edition has.
+      const { runs, items, ...shared } = plugin.storage;
+      expect(shared).toEqual(manifest.storage);
+      expect(Object.keys(manifest.storage ?? {})).toEqual(['results']);
+      expect(runs).toEqual({ indexes: [...BULK_STORAGE.runs.indexes] });
+      expect(items?.indexes).toHaveLength(BULK_STORAGE.items.indexes.length);
       expect(plugin.admin.pages).toEqual(manifest.admin.pages);
       expect(plugin.admin.widgets).toEqual(manifest.admin.widgets);
-      const { preset, removeGps, ...shared } = plugin.admin.settingsSchema!;
-      expect(shared).toEqual(manifest.admin.settingsSchema);
+      const { preset, removeGps, autoOptimize, ...sharedSettings } = plugin.admin.settingsSchema!;
+      expect(sharedSettings).toEqual(manifest.admin.settingsSchema);
       expect(Object.keys(manifest.admin.settingsSchema ?? {})).not.toContain('preset');
+      // Upload automation is native-only and off by default.
+      expect(autoOptimize).toMatchObject({ type: 'boolean', default: false });
+      expect(Object.keys(manifest.admin.settingsSchema ?? {})).not.toContain('autoOptimize');
       expect(preset).toMatchObject({ type: 'select', default: 'balanced' });
       expect(removeGps).toMatchObject({ type: 'boolean', default: false });
       // The manifest lists hooks and routes by name, or as an object when they carry options.

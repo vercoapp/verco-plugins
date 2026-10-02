@@ -35,8 +35,10 @@ import type {
   ActionOutcome,
   AppliedRecord,
   MutationsView,
+  StorageAccounting,
 } from './admin.ts';
-import { scanOptionsFrom, type NativeMutations } from './handlers.ts';
+import { scanOptionsFrom, type ApplyHooks, type NativeMutations } from './handlers.ts';
+import { replaceResult, type OptimizedMarker, type StoredResult } from './job.ts';
 import { HOST_READ_LIMIT_BYTES, readMeasureSettings } from './measure.ts';
 import { ImageProcessorError, type ImageProcessor } from './processor/contract.ts';
 import {
@@ -172,6 +174,38 @@ function interrupted(result: SafeMediaResult | null): boolean {
   return result !== null && !result.ok && result.code === 'INTERRUPTED';
 }
 
+/**
+ * The storage effect of this plugin's operations, from its records of the host's receipts.
+ *
+ * - Gross source reduction: for images that are optimized now, the bytes the active files shrank by.
+ * - Retained originals: every distinct file the host keeps because of an operation of this plugin:
+ *   the original an apply replaced, and the optimized file a restore replaced. The host keeps them
+ *   until it prunes them, which this plugin cannot see.
+ * - Net storage change: retained bytes minus the gross reduction. While originals are retained it is
+ *   an increase: an optimized image costs its new file on top of its original.
+ */
+export function storageAccounting(records: readonly AppliedRecord[]): StorageAccounting {
+  let optimized = 0;
+  let grossReductionBytes = 0;
+  const retained = new Map<string, number>();
+  for (const record of records) {
+    if (record.state === 'optimized') {
+      optimized += 1;
+      grossReductionBytes += record.inputBytes - record.outputBytes;
+    }
+    // Records written before `retained` existed: the original the apply replaced.
+    const entries = record.retained ?? (record.originalSha256 ? { [record.originalSha256]: record.inputBytes } : {});
+    for (const [sha256, size] of Object.entries(entries)) retained.set(sha256, size);
+  }
+  const retainedOriginalBytes = [...retained.values()].reduce((sum, size) => sum + size, 0);
+  return {
+    optimized,
+    grossReductionBytes,
+    retainedOriginalBytes,
+    netStorageChangeBytes: retainedOriginalBytes - grossReductionBytes,
+  };
+}
+
 export function createNativeMutations(options: NativeMutationOptions): NativeMutations {
   const now = options.now ?? (() => new Date());
   let staging: Staging | undefined;
@@ -222,9 +256,76 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
     await ctx.kv.set(`${APPLIED_PREFIX}${value.mediaId}`, value);
   }
 
-  async function updateRecord(ctx: PluginContext, mediaId: string, patch: Partial<AppliedRecord>): Promise<void> {
+  async function updateRecord(
+    ctx: PluginContext,
+    mediaId: string,
+    patch: Partial<AppliedRecord>,
+    retained?: { sha256: string | null; size: number },
+  ): Promise<AppliedRecord | null> {
     const existing = await ctx.kv.get<AppliedRecord>(`${APPLIED_PREFIX}${mediaId}`);
-    if (existing) await record(ctx, { ...existing, ...patch });
+    if (!existing) return null;
+    const next = { ...existing, ...patch, ...(retained ? { retained: withRetained(existing, retained) } : {}) };
+    await record(ctx, next);
+    return next;
+  }
+
+  /** The record's retained files plus one more, keyed by digest. */
+  function withRetained(existing: AppliedRecord | null, added: { sha256: string | null; size: number }): Record<string, number> {
+    const retained = { ...(existing?.retained ?? (existing?.originalSha256 ? { [existing.originalSha256]: existing.inputBytes } : {})) };
+    if (added.sha256 && retained[added.sha256] === undefined) retained[added.sha256] = added.size;
+    return retained;
+  }
+
+  /**
+   * Brings the media item's scan result up to date after an apply or restore, so the report does not
+   * keep offering a saving already made. Changes only an existing result; a failure here does not
+   * change the outcome of the operation, which the host has already published.
+   */
+  async function refreshResult(ctx: PluginContext, mediaId: string, update: (old: StoredResult) => StoredResult): Promise<void> {
+    const results = ctx.storage.results;
+    if (!results) return;
+    try {
+      await replaceResult({ kv: ctx.kv, results, now }, mediaId, update);
+    } catch (error) {
+      ctx.log.warn('Scan result not updated after a media change', { mediaId, error: String(error) });
+    }
+  }
+
+  function optimizedResult(marker: OptimizedMarker): (old: StoredResult) => StoredResult {
+    return (old) => ({
+      ...old,
+      status: 'ok',
+      reason: null,
+      findings: [],
+      estimateBytes: 0,
+      size: marker.outputBytes,
+      optimized: marker,
+    });
+  }
+
+  /** After a restore, the result shows the saving that was measured when the image was optimized. */
+  function restoredResult(old: StoredResult): StoredResult {
+    const marker = old.optimized;
+    if (!marker) return old;
+    return {
+      ...old,
+      status: 'flagged',
+      reason: null,
+      findings: [],
+      estimateBytes: Math.max(0, marker.inputBytes - marker.outputBytes),
+      estimateBasis: null,
+      size: marker.inputBytes,
+      basis: 'measured',
+      measured: {
+        inputBytes: marker.inputBytes,
+        outputBytes: marker.outputBytes,
+        preset: marker.preset,
+        removeGps: marker.removeGps,
+        processor: marker.processor,
+        processorVersion: marker.processorVersion,
+      },
+      optimized: null,
+    };
   }
 
   /** Whether the active revision is this plugin's optimization, and which original it retained. */
@@ -243,6 +344,20 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
     const status = await safe.operation(mediaId, original.retainedByOperationId);
     if (status?.state !== 'published') return null;
     return { original, operationId: original.retainedByOperationId, key: parsed.key };
+  }
+
+  /** The receipt of this plugin's restore that published the active revision, if one did. */
+  async function ownRestore(
+    safe: SafeMediaAccess,
+    mediaId: string,
+    revision: SafeMediaRevision,
+  ): Promise<PublishedReceipt | null> {
+    const retained = (await safe.listRestorableOriginals(mediaId)).find(
+      (candidate) => candidate.replacedByRevisionId === revision.revisionId,
+    );
+    if (!retained || parseOperationId(retained.retainedByOperationId)?.kind !== 'restore') return null;
+    const status = await safe.operation(mediaId, retained.retainedByOperationId);
+    return status?.state === 'published' && status.receipt?.status === 'published' ? status.receipt : null;
   }
 
   /**
@@ -317,7 +432,7 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
     return result;
   }
 
-  async function apply(ctx: PluginContext, settings: Settings, mediaId: string): Promise<ActionOutcome> {
+  async function apply(ctx: PluginContext, settings: Settings, mediaId: string, hooks: ApplyHooks = {}): Promise<ActionOutcome> {
     const base = { action: 'apply' as const, mediaId, filename: null as string | null };
     if (!mediaId || mediaId.length > MAX_MEDIA_ID) return { ...base, outcome: 'failed', code: 'invalid-request', message: 'No valid media ID.' };
     const gated = await availability(ctx);
@@ -387,7 +502,12 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
       if (restored === 'uncertain' || restored === 'exhausted' || !restored.ok) {
         return failure(named, restored, 'The original could not be restored for re-optimization, so nothing changed.');
       }
-      await updateRecord(ctx, mediaId, { state: 'restored', restoredAt: now().toISOString(), revisionId: restored.receipt.newRevisionId });
+      await updateRecord(
+        ctx,
+        mediaId,
+        { state: 'restored', restoredAt: now().toISOString(), revisionId: restored.receipt.newRevisionId },
+        { sha256: restored.receipt.originalSha256, size: active.size ?? 0 },
+      );
       const after = await safe.revision(mediaId);
       if (!after || after.revisionId !== restored.receipt.newRevisionId) {
         return { ...named, outcome: 'conflict', message: 'The image changed right after its original was restored. The newer image was left as it is.' };
@@ -456,6 +576,12 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
       staged = await area.put(operationId, processed.output);
     }
 
+    // A bulk run holds the commit back when it was paused or lost its lease meanwhile. The staged
+    // output stays, so whoever resumes this operation submits the same bytes.
+    if (hooks.beforeCommit && !(await hooks.beforeCommit(operationId))) {
+      return { ...named, outcome: 'deferred', message: 'Processed, but not submitted: the run was paused or another worker took this image over.', reoptimized };
+    }
+
     const result = await submit(safe, mediaId, operationId, () =>
       gated.adapter.apply({
         mediaId,
@@ -505,6 +631,8 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
     }
     await area.remove(operationId);
     const inputBytes = submitted?.inputBytes ?? source.size ?? 0;
+    const existing = await ctx.kv.get<AppliedRecord>(`${APPLIED_PREFIX}${named.mediaId}`);
+    const appliedAt = now().toISOString();
     await record(ctx, {
       mediaId: named.mediaId,
       filename: named.filename ?? named.mediaId,
@@ -518,8 +646,22 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
       preset: policy.preset,
       removeGps: policy.removeGps,
       policyKey: policyKey(policy),
-      appliedAt: now().toISOString(),
+      appliedAt,
+      retained: withRetained(existing, { sha256: receipt.originalSha256, size: inputBytes }),
     });
+    await refreshResult(
+      ctx,
+      named.mediaId,
+      optimizedResult({
+        inputBytes,
+        outputBytes: receipt.size,
+        preset: policy.preset as OptimizedMarker['preset'],
+        removeGps: policy.removeGps,
+        processor: policy.processor,
+        processorVersion: policy.processorVersion,
+        at: appliedAt,
+      }),
+    );
     return {
       ...named,
       outcome: 'optimized',
@@ -562,8 +704,29 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
     if (!active) return { ...named, outcome: 'failed', code: 'not-found', message: 'The image no longer exists or is not ready.' };
     const own = await ownOptimization(safe, mediaId, active);
     if (!own) {
+      const known = await ctx.kv.get<AppliedRecord>(`${APPLIED_PREFIX}${mediaId}`);
+      // This plugin's own restore published the active revision, but its caller stopped before
+      // recording it (a lost response, or a restart): complete it from the host's receipt.
+      const replayed = known?.state === 'optimized' ? await ownRestore(safe, mediaId, active) : null;
+      if (replayed && known) {
+        await updateRecord(
+          ctx,
+          mediaId,
+          { state: 'restored', restoredAt: now().toISOString(), revisionId: replayed.newRevisionId },
+          { sha256: replayed.originalSha256, size: known.outputBytes },
+        );
+        await refreshResult(ctx, mediaId, restoredResult);
+        return {
+          ...named,
+          outcome: 'restored',
+          replayed: true,
+          sha256: replayed.candidateSha256,
+          bytes: replayed.size,
+          revisionId: replayed.newRevisionId,
+        };
+      }
       // Changed by someone else since, or already restored: restoring would overwrite that image.
-      await updateRecord(ctx, mediaId, { state: 'superseded' });
+      if (known?.state === 'optimized') await updateRecord(ctx, mediaId, { state: 'superseded' });
       return {
         ...named,
         outcome: 'nothing-to-restore',
@@ -577,7 +740,13 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
     if (result === 'uncertain' || result === 'exhausted' || !result.ok) {
       return failure(named, result, 'Nothing was restored.');
     }
-    await updateRecord(ctx, mediaId, { state: 'restored', restoredAt: now().toISOString(), revisionId: result.receipt.newRevisionId });
+    await updateRecord(
+      ctx,
+      mediaId,
+      { state: 'restored', restoredAt: now().toISOString(), revisionId: result.receipt.newRevisionId },
+      { sha256: result.receipt.originalSha256, size: active.size ?? 0 },
+    );
+    await refreshResult(ctx, mediaId, restoredResult);
     return {
       ...named,
       outcome: 'restored',
@@ -589,15 +758,29 @@ export function createNativeMutations(options: NativeMutationOptions): NativeMut
   }
 
   return {
+    async allowed(ctx) {
+      const gated = await availability(ctx);
+      return { apply: gated.apply, restore: gated.restore, message: gated.message };
+    },
     async view(ctx): Promise<MutationsView> {
       const gated = await availability(ctx);
-      const optimized = (await records(ctx))
+      const all = await records(ctx);
+      const optimized = all
         .filter((entry) => entry.state === 'optimized')
         .sort((a, b) => b.appliedAt.localeCompare(a.appliedAt))
         .slice(0, APPLIED_SHOWN);
-      return { apply: gated.apply, restore: gated.restore, reason: gated.status.reason, message: gated.message, optimized };
+      return {
+        apply: gated.apply,
+        restore: gated.restore,
+        reason: gated.status.reason,
+        message: gated.message,
+        optimized,
+        accounting: storageAccounting(all),
+      };
     },
     apply,
     restore,
+    records,
+    discard: (operationId) => stagingArea().remove(operationId),
   };
 }

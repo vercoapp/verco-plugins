@@ -9,6 +9,7 @@ import type { CronEvent, MediaAfterUploadEvent, PluginContext, SandboxedRouteCon
 
 import {
   ACTION_APPLY,
+  ACTION_BULK,
   ACTION_RESTORE,
   ACTION_RESULTS_PAGE,
   ACTION_SAMPLE,
@@ -21,6 +22,8 @@ import {
   savingsWidget,
   SKIPPED_SHOWN,
   type ActionOutcome,
+  type AppliedRecord,
+  type BulkView,
   type MutationsView,
   type NativeReportView,
   type ReportView,
@@ -56,6 +59,23 @@ export interface NativeScan {
   sample(ctx: PluginContext, deps: ScanDeps, settings: Settings, mediaId: string): Promise<SampleView | null>;
   /** Apply and restore, which the host may or may not allow. */
   mutations?: NativeMutations;
+  /** Bulk runs and upload automation, offered when the host allows apply or restore. */
+  bulk?: NativeBulk;
+}
+
+/** Called by a bulk run inside an apply, after the output is staged and before it is submitted. */
+export interface ApplyHooks {
+  /** `false` holds the commit back; the apply then answers `deferred` and keeps the staged output. */
+  beforeCommit?(operationId: string): Promise<boolean>;
+}
+
+/** What the shared handlers need of bulk runs: the report section, its actions, and the scan guard. */
+export interface NativeBulk {
+  view(ctx: PluginContext, settings: Settings): Promise<BulkView>;
+  /** Runs a bulk action from the report and returns the toast to show. */
+  act(ctx: PluginContext, action: string, mediaIds: string[] | null): Promise<NonNullable<BlockResponse['toast']>>;
+  /** A message when a scan must not start now, or `null`. */
+  busy(ctx: PluginContext): Promise<string | null>;
 }
 
 /**
@@ -64,8 +84,14 @@ export interface NativeScan {
  */
 export interface NativeMutations {
   view(ctx: PluginContext): Promise<MutationsView>;
-  apply(ctx: PluginContext, settings: Settings, mediaId: string): Promise<ActionOutcome>;
+  /** Whether the host allows apply and restore now, without the records `view` lists. */
+  allowed(ctx: PluginContext): Promise<{ apply: boolean; restore: boolean; message: string }>;
+  apply(ctx: PluginContext, settings: Settings, mediaId: string, hooks?: ApplyHooks): Promise<ActionOutcome>;
   restore(ctx: PluginContext, mediaId: string): Promise<ActionOutcome>;
+  /** This plugin's records of the images it changed. */
+  records(ctx: PluginContext): Promise<AppliedRecord[]>;
+  /** Removes output staged for an operation that will not be submitted. */
+  discard(operationId: string): Promise<void>;
 }
 
 function deps(ctx: PluginContext): ScanDeps {
@@ -104,7 +130,7 @@ export function scanOptionsFrom(settings: Settings): ScanOptions {
 
 type BeginOutcome =
   | { ok: true; started: boolean; run: ScanRun }
-  | { ok: false; error: 'INVALID_SETTINGS' | 'CRON_UNAVAILABLE'; message?: string };
+  | { ok: false; error: 'INVALID_SETTINGS' | 'CRON_UNAVAILABLE' | 'BUSY'; message?: string };
 
 /**
  * Starts a scan, or reports the one already running, and leaves the work to the scheduled task. The
@@ -123,6 +149,8 @@ async function beginScan(ctx: PluginContext, native?: NativeScan): Promise<Begin
     return { ok: false, error: 'INVALID_SETTINGS', message: error.message };
   }
   if (!ctx.cron) return { ok: false, error: 'CRON_UNAVAILABLE' };
+  const busy = native?.bulk ? await native.bulk.busy(ctx) : null;
+  if (busy) return { ok: false, error: 'BUSY', message: busy };
 
   const { started, run } = await startScan(deps(ctx), options, measure);
   await ctx.cron.schedule(SCAN_TASK, { schedule: SCAN_TASK_SCHEDULE });
@@ -131,6 +159,7 @@ async function beginScan(ctx: PluginContext, native?: NativeScan): Promise<Begin
 
 function beginToast(outcome: BeginOutcome): NonNullable<BlockResponse['toast']> {
   if (!outcome.ok) {
+    if (outcome.error === 'BUSY') return { type: 'info', message: `The scan did not start. ${outcome.message}` };
     return outcome.error === 'INVALID_SETTINGS'
       ? { type: 'error', message: `The scan did not start. Check the plugin settings: ${outcome.message}.` }
       : { type: 'error', message: 'The scan did not start: this site cannot run scheduled tasks.' };
@@ -238,13 +267,20 @@ export async function handleAdmin(
     // On a host without safe-media access, an edition that cannot measure renders the registry
     // edition's page, as before; elsewhere the page says why apply and restore are unavailable.
     const mutations = offered && (extras || offered.reason !== 'missing-host-operation' || offered.optimized.length > 0) ? offered : null;
+    const bulk = mutations && native.bulk && (mutations.apply || mutations.restore) ? await native.bulk.view(ctx, settings) : null;
     return {
       ...view,
       native: extras && sample ? { ...extras, sample } : extras,
       ...(mutations ? { mutations } : {}),
+      ...(bulk ? { bulk } : {}),
       ...(action ? { action } : {}),
     };
   };
+
+  if (native?.bulk && request?.kind === 'action' && request.actionId.startsWith(ACTION_BULK)) {
+    const toast = await native.bulk.act(ctx, request.actionId, request.mediaIds);
+    return reportPage(await withNative(await loadReport(ctx, null, locale)), toast);
+  }
 
   const mutation = request?.kind === 'action' && request.mediaId ? request.mediaId : null;
   if (native?.mutations && settings && mutation && request?.kind === 'action') {

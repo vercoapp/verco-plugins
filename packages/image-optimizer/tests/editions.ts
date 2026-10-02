@@ -21,7 +21,17 @@ export interface Edition {
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
 /** Routes only the native edition declares. */
-export const NATIVE_ONLY_ROUTES: readonly string[] = ['apply', 'restore'];
+export const NATIVE_ONLY_ROUTES: readonly string[] = [
+  'apply',
+  'restore',
+  'bulk-start',
+  'bulk-pause',
+  'bulk-resume',
+  'bulk-cancel',
+  'bulk-retry',
+  'bulk-reconcile',
+  'bulk-status',
+];
 
 function handlerOf(entry: unknown): Handler {
   const handler = typeof entry === 'function' ? entry : (entry as { handler?: unknown } | undefined)?.handler;
@@ -60,7 +70,7 @@ const native: Edition = {
   hook: (ctx, name, event) =>
     handlerOf(createPlugin().hooks[name as keyof ReturnType<typeof createPlugin>['hooks']])(event, ctx),
   hookErrorPolicy: (name) => createPlugin().hooks[name as keyof ReturnType<typeof createPlugin>['hooks']]?.errorPolicy,
-  // The shared routes; `apply` and `restore` are the native edition's own (checked in `editions.test.ts`).
+  // The shared routes; apply, restore and the bulk routes are the native edition's own (checked in `editions.test.ts`).
   routes: () =>
     Object.fromEntries(
       Object.entries(createPlugin().routes)

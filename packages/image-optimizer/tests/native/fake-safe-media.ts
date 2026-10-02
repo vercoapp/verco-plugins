@@ -92,6 +92,8 @@ export function fakeSafeMedia(
   const publications: Array<{ mediaId: string; operationId: string; kind: string }> = [];
   const calls = { support: 0, replace: 0, restore: 0 };
   const faults: Fault[] = [];
+  /** Called after a replace publishes, before it answers; a test can hold the answer back. */
+  let afterPublish: ((operationId: string) => Promise<void>) | undefined;
   let sequence = 0;
   let lookupFails = false;
 
@@ -288,13 +290,18 @@ export function fakeSafeMedia(
         } catch {
           return finish(operation, 'UNDECODABLE');
         }
+        // Another call with the same request finished it while this one validated, as the host's
+        // conditional state transitions allow: answer with its outcome, never publish twice.
+        if (operation.state !== 'intent') return replay(operation) ?? refused('CONFLICT');
         if (MIME[metadata.format ?? ''] !== source.mimeType) return finish(operation, 'WRONG_FORMAT');
         if (metadata.width !== source.width || metadata.height !== source.height) return finish(operation, 'DIMENSIONS_CHANGED');
 
         const originalSha256 = retain(source);
         if (!originalSha256) return finish(operation, 'SOURCE_CHANGED');
         const revision = publish(request.mediaId, bytes, candidateSha256, source);
-        return published(operation, revision, originalSha256, source);
+        const result = published(operation, revision, originalSha256, source);
+        await afterPublish?.(request.operationId);
+        return result;
       },
 
       async restore(request) {
@@ -372,6 +379,16 @@ export function fakeSafeMedia(
     originals,
     operations,
     support,
+    /** Runs `hook` after each replace publishes and before it answers, as a slow or stopped caller sees it. */
+    onPublished(hook: ((operationId: string) => Promise<void>) | undefined) {
+      afterPublish = hook;
+    },
+    /** Removes a media item, as an editor deleting it does. */
+    remove(mediaId: string) {
+      const index = library.findIndex(({ id }) => id === mediaId);
+      if (index >= 0) library.splice(index, 1);
+      active.delete(mediaId);
+    },
     /** Fails the next matching step once. */
     failNext(...next: Fault[]) {
       faults.push(...next);

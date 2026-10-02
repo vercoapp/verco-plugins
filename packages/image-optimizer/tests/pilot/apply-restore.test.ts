@@ -4,42 +4,30 @@
  * restoring through its routes. Skipped when the pilot checkout is absent; see `vitest.config.ts`.
  */
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import type { ActionOutcome } from '../../src/admin.ts';
-import { createNativePlugin } from '../../src/native.ts';
-import { createLocalProcessor } from '../../src/processor/local.ts';
-import { createStaging } from '../../src/staging.ts';
 import { photo } from '../native/fixtures.ts';
+import { core, LOCAL_PROFILE, startPilot, type Pilot } from './pilot-runtime.ts';
 
-const core = process.env.EMDASH_PILOT_CORE ?? '';
-const LOCAL_PROFILE = { runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' };
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
-
-/** Imports a module of the pilot checkout, or a package it depends on. */
-async function pilot<T>(path: string): Promise<T> {
-  return import(/* @vite-ignore */ path.startsWith('src/') ? join(core, path) : createRequire(join(core, 'package.json')).resolve(path));
-}
 
 describe.skipIf(!core)('the native edition on the patched host', () => {
   let root: string;
-  let runtime: { stopCron(): Promise<void>; handlePluginApiRoute(...args: unknown[]): Promise<{ success: boolean; data?: unknown; error?: unknown }>; storage: { download(key: string): Promise<{ body: ReadableStream }> } | null; db: unknown } | undefined;
-  const processor = createLocalProcessor();
+  let site: Pilot | undefined;
 
   // The runtime caches its database per process, so the tests share one site directory.
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), 'image-optimizer-pilot-'));
-    await mkdir(join(root, 'uploads'), { recursive: true });
   });
 
   afterEach(async () => {
-    await runtime?.stopCron();
-    runtime = undefined;
+    await site?.runtime.stopCron();
+    site = undefined;
   });
 
   afterAll(async () => {
@@ -47,73 +35,15 @@ describe.skipIf(!core)('the native edition on the patched host', () => {
   });
 
   async function start(qualifiedProfiles: Array<Record<string, string>>, key: string) {
-    const { EmDashRuntime } = await pilot<{ EmDashRuntime: { create(deps: unknown): Promise<NonNullable<typeof runtime>> } }>('src/emdash-runtime.ts');
-    const { LocalStorage } = await pilot<{ LocalStorage: new (options: unknown) => { upload(input: unknown): Promise<unknown> } }>('src/storage/local.ts');
-    const { MediaRepository } = await pilot<{ MediaRepository: new (db: unknown) => { create(input: unknown): Promise<{ id: string }>; update(id: string, input: unknown): Promise<unknown>; findById(id: string): Promise<Record<string, unknown> | null> } }>('src/database/repositories/media.ts');
-    const { NodeSqliteCompatDatabase } = await pilot<{ NodeSqliteCompatDatabase: new (path: string) => unknown }>('src/db/node-sqlite-compat.ts');
-    const { SqliteDialect } = await pilot<{ SqliteDialect: new (options: unknown) => unknown }>('kysely');
-
-    const storage = new LocalStorage({ directory: join(root, 'uploads'), baseUrl: '/media' });
-    const plugin = createNativePlugin({
-      processor: () => processor,
-      qualifiedProfiles,
-      staging: () => createStaging({ directory: join(root, 'staging') }),
-    });
-    runtime = await EmDashRuntime.create({
-      config: {
-        database: { entrypoint: 'emdash/db/sqlite', config: {}, type: 'sqlite' },
-        storage: { entrypoint: 'emdash/storage/local', config: { directory: join(root, 'uploads') } },
-        safeMedia: { privateDirectory: join(root, 'private') },
-      },
-      plugins: [plugin],
-      createDialect: () => new SqliteDialect({ database: new NodeSqliteCompatDatabase(join(root, 'site.db')) }),
-      createStorage: () => storage,
-      sandboxEnabled: false,
-      sandboxedPluginEntries: [],
-      createSandboxRunner: null,
-    });
-
+    site = await startPilot(root, qualifiedProfiles);
     // Large enough to pass the default thresholds (50 KB and 20%).
     const original = await photo(3, 640, 480).jpeg({ quality: 98, chromaSubsampling: '4:4:4' }).toBuffer();
-    await storage.upload({ key, body: original, contentType: 'image/jpeg' });
-    const media = new MediaRepository(runtime.db);
-    const { id } = await media.create({
-      filename: 'photo.jpg',
-      mimeType: 'image/jpeg',
-      size: original.byteLength,
-      width: 640,
-      height: 480,
-      storageKey: key,
-      alt: 'A gradient',
-      caption: 'Generated for the test',
-      status: 'ready',
-    });
-    await media.update(id, { focalX: 0.25, focalY: 0.75 });
-    const { OptionsRepository } = await pilot<{ OptionsRepository: new (db: unknown) => { set(name: string, value: unknown): Promise<void> } }>('src/database/repositories/options.ts');
-    const setSetting = (name: string, value: unknown) =>
-      new OptionsRepository(runtime!.db).set(`plugin:image-optimizer:settings:${name}`, value);
-    return { id, original, media, setSetting };
+    const id = await site.addImage(key, original, 640, 480);
+    return { id, original, media: site.media, setSetting: site.setSetting };
   }
 
-  async function route(name: string, mediaId: string): Promise<ActionOutcome> {
-    const result = await runtime!.handlePluginApiRoute(
-      'image-optimizer',
-      'POST',
-      `/${name}`,
-      new Request(`http://test.local/_emdash/api/plugins/image-optimizer/${name}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mediaId }),
-      }),
-    );
-    expect(result.success, JSON.stringify(result.error)).toBe(true);
-    return result.data as ActionOutcome;
-  }
-
-  async function served(key: string): Promise<Uint8Array> {
-    const { body } = await runtime!.storage!.download(key);
-    return new Uint8Array(await new Response(body).arrayBuffer());
-  }
+  const route = (name: string, mediaId: string) => site!.route<ActionOutcome>(name, { mediaId });
+  const served = (key: string) => site!.served(key);
 
   /** What a replacement must keep: identity, address and editorial fields. */
   const kept = (row: Record<string, unknown> | null) => ({

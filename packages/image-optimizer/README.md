@@ -22,8 +22,9 @@ does not change media. It has the same plugin ID, storage, settings, routes, rep
 a site that switches between the editions keeps its scan results and settings. Where the registry
 edition estimates savings from metadata, the native edition can
 [measure them](#measured-savings-native-edition). It also contains
-[apply and restore](#apply-and-restore-native-edition-pilot), which stay disabled on every host until a
-hosted profile has been qualified.
+[apply and restore](#apply-and-restore-native-edition-pilot) and
+[bulk runs](#bulk-runs-and-upload-automation-native-edition-pilot), which stay disabled on every host
+until a hosted profile has been qualified.
 
 A native plugin **runs without isolation, in the site process**. EmDash's capability checks still gate
 what the plugin's context offers, but they are not a security boundary: the plugin's code has the same
@@ -150,8 +151,54 @@ imageOptimizerPlugin({
   files are removed once the host's outcome is final, and any older than a day are removed on the next
   apply.
 
-Both routes accept POST only and require the `plugins:manage` permission. One image at a time: there
-are no bulk runs, scheduled optimization or optimization on upload yet.
+Both routes accept POST only and require the `plugins:manage` permission.
+
+### Bulk runs and upload automation (native edition, pilot)
+
+Bulk runs apply or restore many images through the same fenced path as the buttons above. **They are
+disabled wherever apply and restore are**, which is every host until a hosted profile has been
+qualified; the report then shows no bulk controls, and the routes refuse to start a run. What has been
+exercised is the same as for apply and restore, plus a 1,000-image run against the in-memory model of
+the host with restarts, overlapping workers, editor changes, deletions and lost responses.
+
+- **Starting a run.** The report offers *Optimize all measured images* (every result a measured scan
+  listed), *Optimize the N listed* (the results on the page shown) and *Restore all originals* (every
+  image this plugin optimized). `POST .../bulk-start` takes `{ "kind": "apply" | "restore",
+  "mediaIds": [...] }`, up to 1,000 IDs; without `mediaIds` it takes the same sets as the buttons. Only
+  measured savings start an apply: an estimate from metadata is not a reason to change a file.
+- **One run at a time,** never beside a scan: a run does not start while a scan runs, a scan does not
+  start while a run is active, and a run that meets a scan waits for it.
+- **Pace.** Runs continue in the background with the scheduled task, whether or not the report is open:
+  one image at a time, at most 20 per tick and no new image after 20 seconds, as for measured scans.
+- **Durable state.** Each run and each of its images has a record in the plugin's storage (collections
+  `runs` and `items`, native edition only), with the image's state: waiting, processing, ready to
+  submit, submitting, waiting to retry, then optimized, restored, skipped, conflict or failed. A worker
+  claims an image with a conditional write and holds it under a five-minute lease; every later step is
+  a conditional write too, so a worker whose lease expired and was taken over cannot submit. After a
+  restart, the run continues from these records, and an image whose worker stopped mid-submission is
+  completed from the host's record of the operation, not submitted again.
+- **Controls** (report buttons, or `POST .../bulk-pause`, `bulk-resume`, `bulk-cancel`, `bulk-retry`,
+  `bulk-status`). Pause and cancel stop new work between images; an image already being submitted
+  finishes. Output processed while the run was paused waits in staging and is submitted on resume.
+  Cancel skips the images not yet submitted and leaves the optimized ones optimized. Retry queues the
+  failed images of the last run again. A restore run reports each image as restored, failed with a
+  missing original, or a conflict when the image changed since it was optimized.
+- **Upload automation** (setting *Optimize new uploads*, off by default). Each new upload is queued,
+  never processed during the upload, and an upload succeeds whatever happens to its optimization. A
+  queue in the background works through uploads when no run is active. Once an hour, and on the
+  report's *Find missed uploads* button, a reconciliation pass looks through media uploaded since
+  automation was switched on and queues what the upload hook missed; an image is queued at most once.
+  Switching the setting off stops queueing; switching it on again starts from that moment. Where the
+  host does not allow changes, nothing is queued.
+- **Accounting.** The report keeps three numbers apart. *Source reduction (gross)*: how much smaller
+  the files of the images optimized now are. *Originals retained*: the files the host keeps because of
+  this plugin's operations, the originals that applies replaced and the optimized files that restores
+  replaced, counted once per distinct file. *Net storage change*: retained bytes minus the reduction.
+  While originals are retained this is an **increase**: an optimized image costs its new file on top of
+  its original. The reduction makes pages lighter to deliver; it is not a storage saving. The numbers
+  come from the host's receipts as the plugin recorded them; the host can prune originals without the
+  plugin knowing, which this does not show. After an apply or restore, the image's scan result and the
+  scan's totals are updated, so the report does not keep offering a saving already made.
 
 **Limits of the local processor.** Inputs up to 24 megapixels and 50 MiB; EmDash lets a plugin read at
 most 16 MiB of a file, so larger files are skipped. One encode is killed after 60 seconds. These
@@ -207,7 +254,8 @@ dimensions.
 - **Image savings** (a dashboard widget): the estimated saving and the number of images to review.
 - **Settings**: the largest useful edge in pixels (default 2560), and the smallest saving worth
   reporting in KB (default 50) and as a percentage of the file (default 20). The native edition adds
-  the encoding preset and GPS removal for [measured savings](#measured-savings-native-edition).
+  the encoding preset and GPS removal for [measured savings](#measured-savings-native-edition), and
+  [upload automation](#bulk-runs-and-upload-automation-native-edition-pilot) (off by default).
 
 Opening the report and starting a scan require the `plugins:manage` permission. The page and widget
 are in English; numbers follow the administrator's locale.
@@ -282,12 +330,13 @@ pnpm build       # Build the sandbox bundle with the EmDash plugin CLI, then the
 
 Both editions are wrappers over the shared code in `src/handlers.ts`: `src/plugin.ts` is the sandboxed
 entry and `src/native.ts` the native one, which adds the measured scan and sample (`src/measure.ts`)
-over the local processor (`src/processor/`), and apply and restore (`src/mutations.ts`, with
-`src/staging.ts` and the media host adapter in `packages/media-host-adapter`). The tests in
+over the local processor (`src/processor/`), apply and restore (`src/mutations.ts`, with
+`src/staging.ts` and the media host adapter in `packages/media-host-adapter`), and bulk runs and upload
+automation (`src/bulk.ts`). The tests in
 `tests/pilot/` run the native edition in the patched host's runtime; they need the pilot checkout
 (`pnpm host:pilot`, or `EMDASH_PILOT_DIR` pointing at one) and are skipped without it. The sandboxed entry must not import anything native-only,
-and the native declarations must match `emdash-plugin.jsonc` apart from the byte-read capability and
-the two native settings; tests check both.
+and the native declarations must match `emdash-plugin.jsonc` apart from the byte-read capability, the
+three native settings and the two storage collections of bulk runs; tests check both.
 
 Releases are published by the `verco.app` Atmosphere account, pinned by its DID in
 `emdash-plugin.jsonc`, so a publish from any other account fails.

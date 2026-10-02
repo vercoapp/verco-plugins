@@ -143,6 +143,19 @@ export interface StoredResult {
   measured?: MeasuredOutput | null;
   /** Failed results: the processor's error code (or `read-failed`) and the attempts made. */
   failure?: { code: ProcessorErrorCode | 'read-failed' | 'internal'; attempts: number } | null;
+  /** Native edition: set when this plugin optimized the image after the scan, cleared on restore. */
+  optimized?: OptimizedMarker | null;
+}
+
+/** What an apply recorded on the image's scan result: the saving made, and with which settings. */
+export interface OptimizedMarker {
+  inputBytes: number;
+  outputBytes: number;
+  preset: PresetName;
+  removeGps: boolean;
+  processor: string;
+  processorVersion: string;
+  at: string;
 }
 
 export type ResultBasis = 'measured' | 'estimated';
@@ -182,6 +195,22 @@ export function addSummaries(a: RunTotals, b: RunTotals): RunTotals {
     measuredSavingsBytes: (a.measuredSavingsBytes ?? 0) + (b.measuredSavingsBytes ?? 0),
     failed: (a.failed ?? 0) + (b.failed ?? 0),
   };
+}
+
+/** `a` minus `b`, field by field. */
+export function subtractSummaries(a: RunTotals, b: RunTotals): RunTotals {
+  const negated: RunTotals = {
+    scanned: -b.scanned,
+    flagged: -b.flagged,
+    ok: -b.ok,
+    skipped: Object.fromEntries(Object.entries(b.skipped).map(([reason, count]) => [reason, -(count ?? 0)])),
+    estimatedSavingsBytes: -b.estimatedSavingsBytes,
+    unestimated: -b.unestimated,
+    measured: -(b.measured ?? 0),
+    measuredSavingsBytes: -(b.measuredSavingsBytes ?? 0),
+    failed: -(b.failed ?? 0),
+  };
+  return addSummaries(a, negated);
 }
 
 /** Totals for stored results, estimated and measured savings kept apart. */
@@ -388,4 +417,41 @@ export async function recordUpload(deps: ScanDeps, mediaId: string, defaults: Sc
     if (written.applied) return;
   }
   deps.log.warn('Scan totals not updated for an upload after repeated conflicts', { mediaId });
+}
+
+/** Attempts for each conditional write of `replaceResult`. */
+const REPLACE_RESULT_ATTEMPTS = 3;
+
+/**
+ * Rewrites the stored result of one media item, if there is one, with conditional writes, and moves
+ * the scan's totals by the difference when the result counts toward them (it belongs to the scan
+ * in the state record). Never creates a result. Returns whether the result was rewritten.
+ */
+export async function replaceResult(
+  deps: Pick<ScanDeps, 'kv' | 'results' | 'now'>,
+  mediaId: string,
+  update: (old: StoredResult) => StoredResult,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < REPLACE_RESULT_ATTEMPTS; attempt += 1) {
+    const row = await deps.results.getVersioned(mediaId);
+    if (!row) return false;
+    const old = row.value as StoredResult;
+    const next = update(old);
+    if (next === old) return false;
+    const written = await deps.results.compareAndSet(mediaId, row.revision, next);
+    if (!written.applied) continue;
+    for (let retry = 0; retry < REPLACE_RESULT_ATTEMPTS; retry += 1) {
+      const state = await deps.kv.getVersioned<ScanRun>(SCAN_STATE_KEY);
+      if (!state || state.value.runId !== old.runId) break;
+      const totals = addSummaries(subtractSummaries(state.value.totals, summarizeStored([old])), summarizeStored([next]));
+      const moved = await deps.kv.compareAndSet(SCAN_STATE_KEY, state.revision, {
+        ...state.value,
+        totals,
+        updatedAt: deps.now().toISOString(),
+      });
+      if (moved.applied) break;
+    }
+    return true;
+  }
+  return false;
 }

@@ -28,10 +28,30 @@ export const ACTION_APPLY = 'apply_image';
 /** Native edition, on a host that allows it: put back the original of one optimized image. */
 export const ACTION_RESTORE = 'restore_image';
 export const SKIPPED_SHOWN = 50;
+/** Native edition: bulk run controls share this prefix. */
+export const ACTION_BULK = 'bulk_';
+export const ACTION_BULK_APPLY_ALL = 'bulk_apply_all';
+export const ACTION_BULK_APPLY_PAGE = 'bulk_apply_page';
+export const ACTION_BULK_RESTORE_ALL = 'bulk_restore_all';
+export const ACTION_BULK_PAUSE = 'bulk_pause';
+export const ACTION_BULK_RESUME = 'bulk_resume';
+export const ACTION_BULK_CANCEL = 'bulk_cancel';
+export const ACTION_BULK_RETRY = 'bulk_retry';
+export const ACTION_BULK_RECONCILE = 'bulk_reconcile';
+/** Declared because tables require one; the list shows a single page. */
+export const ACTION_BULK_ATTENTION_PAGE = 'bulk_attention_page';
 
 export type AdminRequest =
   | { kind: 'page'; page: string }
-  | { kind: 'action'; actionId: string; page: string | null; cursor: string | null; mediaId: string | null };
+  | {
+      kind: 'action';
+      actionId: string;
+      page: string | null;
+      cursor: string | null;
+      mediaId: string | null;
+      /** Bulk actions on a selection: the media IDs, as strings only. */
+      mediaIds: string[] | null;
+    };
 
 /** Narrows the host's interaction payload; anything unrecognized is `null`. */
 export function parseAdminRequest(input: unknown): AdminRequest | null {
@@ -46,12 +66,14 @@ export function parseAdminRequest(input: unknown): AdminRequest | null {
       const found = typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[name] : undefined;
       return typeof found === 'string' ? found : null;
     };
+    const ids = typeof value === 'object' && value !== null ? (value as Record<string, unknown>).mediaIds : undefined;
     return {
       kind: 'action',
       actionId: interaction.action_id,
       page: typeof interaction.page === 'string' ? interaction.page : null,
       cursor: field('cursor'),
       mediaId: field('mediaId'),
+      mediaIds: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : null,
     };
   }
   return null;
@@ -108,6 +130,64 @@ export interface AppliedRecord {
   policyKey: string;
   appliedAt: string;
   restoredAt?: string;
+  /**
+   * Files the host retains because of this plugin's operations on the image, by SHA-256: the
+   * original an apply replaced, and the optimized file a restore replaced. Absent in older records.
+   */
+  retained?: Record<string, number>;
+}
+
+/** The storage effect of this plugin's changes. Gross reduction is not a storage saving. */
+export interface StorageAccounting {
+  /** Images optimized by this plugin now. */
+  optimized: number;
+  /** How much smaller the active files of those images are than the files they replaced. */
+  grossReductionBytes: number;
+  /** Files the host keeps because of this plugin's operations, so they can be restored. */
+  retainedOriginalBytes: number;
+  /** Retained bytes minus the gross reduction: positive is more storage used than before. */
+  netStorageChangeBytes: number;
+}
+
+/** Bulk item states, as `bulk.ts` defines them. */
+export type BulkItemState =
+  | 'queued'
+  | 'processing'
+  | 'ready_to_commit'
+  | 'committing'
+  | 'retry_wait'
+  | 'optimized'
+  | 'restored'
+  | 'skipped'
+  | 'conflict'
+  | 'failed';
+export type BulkCounts = Record<BulkItemState, number>;
+
+export interface BulkItemView {
+  mediaId: string;
+  filename: string;
+  state: BulkItemState;
+  code: string | null;
+  message: string | null;
+}
+
+/** The active or most recent bulk run, and upload automation. */
+export interface BulkView {
+  run: {
+    runId: string;
+    kind: 'apply' | 'restore';
+    status: 'running' | 'paused' | 'cancelling' | 'complete' | 'cancelled';
+    prepared: boolean;
+    createdAt: string;
+    finishedAt: string | null;
+    counts: BulkCounts;
+    /** Gross: what this run's optimized files shrank by. */
+    grossReductionBytes: number;
+    /** Failed and conflicting items, first ones. */
+    attention: BulkItemView[];
+  } | null;
+  automation: { enabled: boolean; counts: BulkCounts | null };
+  scanRunning: boolean;
 }
 
 /** Whether apply and restore are allowed on this host, and why not. */
@@ -118,6 +198,8 @@ export interface MutationsView {
   message: string;
   /** Images this plugin optimized and has not restored, newest first. */
   optimized: AppliedRecord[];
+  /** Over every image this plugin changed. */
+  accounting: StorageAccounting;
 }
 
 type ActionBase = {
@@ -135,7 +217,7 @@ export type ActionOutcome = ActionBase &
     | { outcome: 'restored'; replayed: boolean; sha256: string; bytes: number; revisionId: string }
     | { outcome: 'unavailable'; reason: string; message: string }
     | { outcome: 'skipped'; reason: string; message: string; inputBytes?: number; outputBytes?: number }
-    | { outcome: 'conflict' | 'nothing-to-restore' | 'uncertain'; message: string }
+    | { outcome: 'conflict' | 'nothing-to-restore' | 'uncertain' | 'deferred'; message: string }
     | { outcome: 'no-original'; message: string; retryable?: boolean }
     | { outcome: 'failed'; code: string; message: string; retryable?: boolean }
   );
@@ -156,6 +238,8 @@ export interface ReportView {
   mutations?: MutationsView;
   /** Native edition only: the outcome of the apply or restore just requested. */
   action?: ActionOutcome;
+  /** Native edition only, when the host allows apply or restore: bulk runs and automation. */
+  bulk?: BulkView;
 }
 
 const SKIP_LABELS: Record<ResultSkipReason, string> = {
@@ -577,6 +661,7 @@ const ACTION_TITLES: Record<ActionOutcome['outcome'], string> = {
   conflict: 'not changed: it changed meanwhile',
   'nothing-to-restore': 'nothing to restore',
   uncertain: 'outcome not confirmed',
+  deferred: 'not changed: held back',
   'no-original': 'no original to restore',
   failed: 'not changed',
 };
@@ -612,6 +697,7 @@ function actionBlocks(action: ActionOutcome, locale: string): Block[] {
     }
     case 'conflict':
     case 'uncertain':
+    case 'deferred':
     case 'unavailable':
     case 'nothing-to-restore':
     case 'no-original':
@@ -619,6 +705,225 @@ function actionBlocks(action: ActionOutcome, locale: string): Block[] {
     case 'failed':
       return [{ type: 'banner', variant: 'error', title, description: `${action.message} (${action.code})` }];
   }
+}
+
+function signedBytes(bytes: number, locale: string): string {
+  if (bytes === 0) return formatBytes(0, locale);
+  return `${bytes > 0 ? '+' : '−'}${formatBytes(Math.abs(bytes), locale)}`;
+}
+
+/**
+ * The storage effect, three numbers kept apart: the gross reduction of the active files, the
+ * originals the host retains, and the net change. The gross reduction is never called a saving of
+ * storage: while originals are retained, optimizing uses more storage, not less.
+ */
+export function accountingBlocks(accounting: StorageAccounting, locale: string): Block[] {
+  const net = accounting.netStorageChangeBytes;
+  return [
+    {
+      type: 'stats',
+      block_id: 'storage',
+      items: [
+        {
+          label: 'Source reduction (gross)',
+          value: formatBytes(accounting.grossReductionBytes, locale),
+          description: `How much smaller the ${formatCount(accounting.optimized, locale)} optimized files are`,
+        },
+        {
+          label: 'Originals retained',
+          value: formatBytes(accounting.retainedOriginalBytes, locale),
+          description: 'Kept by the host so they can be restored',
+        },
+      ],
+    },
+    {
+      type: 'stats',
+      block_id: 'net-storage',
+      items: [
+        {
+          label: 'Net storage change',
+          value: signedBytes(net, locale),
+          description:
+            net > 0 ? 'More storage than before: the retained originals outweigh the reduction' : 'Less storage than before',
+          trend: net > 0 ? 'up' : net < 0 ? 'down' : 'neutral',
+        },
+      ],
+    },
+    {
+      type: 'context',
+      text: 'The source reduction makes pages lighter to deliver. It is not a storage saving: the host keeps every original this plugin replaced, and every optimized file a restore replaced, until they are pruned.',
+    },
+  ];
+}
+
+const BULK_STATE_LABELS: Record<BulkItemState, string> = {
+  queued: 'waiting',
+  processing: 'processing',
+  ready_to_commit: 'ready to submit',
+  committing: 'submitting',
+  retry_wait: 'waiting to retry',
+  optimized: 'optimized',
+  restored: 'restored',
+  skipped: 'skipped',
+  conflict: 'conflicts',
+  failed: 'failed',
+};
+
+/** "12 optimized, 3 skipped, 1 failed", leaving out states with none. */
+function countsText(counts: BulkCounts, locale: string): string {
+  const parts = (Object.entries(counts) as Array<[BulkItemState, number]>)
+    .filter(([, count]) => count > 0)
+    .map(([state, count]) => `${formatCount(count, locale)} ${BULK_STATE_LABELS[state]}`);
+  return parts.length > 0 ? parts.join(', ') : 'no images';
+}
+
+const BULK_ITEM_EXPLANATIONS: Record<string, string> = {
+  conflict: 'The image changed while the run worked on it; the newer image was left as it is.',
+  'nothing-to-restore': 'The active image is no longer this plugin’s optimization, so it was left as it is.',
+  'missing-original': 'The host has no intact original for it, so nothing was restored.',
+  'attempts-exhausted': 'Gave up after repeated attempts.',
+};
+
+function cancelButton() {
+  return {
+    type: 'button' as const,
+    action_id: ACTION_BULK_CANCEL,
+    label: 'Cancel run',
+    style: 'danger' as const,
+    confirm: {
+      title: 'Cancel the run?',
+      text: 'Images not yet submitted are skipped. Images already optimized stay optimized; restore them separately if needed.',
+      confirm: 'Cancel run',
+      deny: 'Keep running',
+      style: 'danger' as const,
+    },
+  };
+}
+
+/** Controls for starting runs, shown when no run is active. */
+function startButtons(view: ReportView, bulk: BulkView, mutations: MutationsView, locale: string) {
+  const elements: Extract<Block, { type: 'actions' }>['elements'] = [];
+  if (bulk.scanRunning) return elements;
+  if (mutations.apply) {
+    elements.push({
+      type: 'button' as const,
+      action_id: ACTION_BULK_APPLY_ALL,
+      label: 'Optimize all measured images',
+      style: 'primary' as const,
+      confirm: {
+        title: 'Optimize every image the scan measured as worth it?',
+        text: 'Each image is re-encoded with the current settings and replaced in place, in the background, only when the saving still reaches the thresholds and the image has not changed meanwhile. The host keeps every original, so storage use grows; Restore puts originals back.',
+        confirm: 'Start',
+        deny: 'Cancel',
+      },
+    });
+    const pageIds = view.results.items
+      .filter(({ data }) => resultBasis(data) === 'measured' && !data.optimized)
+      .map(({ id }) => id);
+    if (pageIds.length > 0) {
+      elements.push({
+        type: 'button' as const,
+        action_id: ACTION_BULK_APPLY_PAGE,
+        label: `Optimize the ${formatCount(pageIds.length, locale)} listed`,
+        value: { mediaIds: pageIds },
+      });
+    }
+  }
+  if (mutations.restore && mutations.accounting.optimized > 0) {
+    elements.push({
+      type: 'button' as const,
+      action_id: ACTION_BULK_RESTORE_ALL,
+      label: 'Restore all originals',
+      style: 'danger' as const,
+      confirm: {
+        title: 'Restore the original of every image this plugin optimized?',
+        text: 'Each original is put back byte for byte, unless the image was changed since it was optimized.',
+        confirm: 'Restore all',
+        deny: 'Cancel',
+        style: 'danger' as const,
+      },
+    });
+  }
+  const failed = bulk.run?.counts.failed ?? 0;
+  if (failed > 0) {
+    elements.push({ type: 'button' as const, action_id: ACTION_BULK_RETRY, label: `Retry ${formatCount(failed, locale)} failed` });
+  }
+  return elements;
+}
+
+/** Bulk runs: the active or last run with its controls, and upload automation. */
+function bulkBlocks(view: ReportView, bulk: BulkView, mutations: MutationsView, locale: string): Block[] {
+  const blocks: Block[] = [{ type: 'divider' }, { type: 'section', text: 'Bulk optimization' }];
+  const run = bulk.run;
+  if (run && (run.status === 'running' || run.status === 'paused' || run.status === 'cancelling')) {
+    const total = Object.values(run.counts).reduce((sum, count) => sum + count, 0);
+    const what = run.kind === 'apply' ? 'Optimization run' : 'Restore run';
+    const status = run.status === 'cancelling' ? 'being cancelled' : run.status === 'paused' ? 'paused' : 'in progress';
+    blocks.push({
+      type: 'banner',
+      title: `${what} ${status}`,
+      description: `${run.prepared ? `${formatCount(total, locale)} images: ${countsText(run.counts, locale)}.` : 'Selecting images.'} It continues in the background, one image at a time, about once a minute; refresh to see progress. An image already being submitted finishes even when the run is paused or cancelled.`,
+    });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        ...(run.status === 'running' ? [{ type: 'button' as const, action_id: ACTION_BULK_PAUSE, label: 'Pause' }] : []),
+        ...(run.status === 'paused'
+          ? [{ type: 'button' as const, action_id: ACTION_BULK_RESUME, label: 'Resume', style: 'primary' as const }]
+          : []),
+        ...(run.status !== 'cancelling' ? [cancelButton()] : []),
+        { type: 'button', action_id: ACTION_REFRESH, label: 'Refresh' },
+      ],
+    });
+  } else {
+    if (run) {
+      const ended = formatTime(run.finishedAt ?? run.createdAt, locale);
+      const reduction =
+        run.kind === 'apply'
+          ? ` Its files are ${formatBytes(run.grossReductionBytes, locale)} smaller in all (gross, not a storage saving).`
+          : '';
+      blocks.push({
+        type: 'context',
+        text: `Last ${run.kind === 'apply' ? 'optimization' : 'restore'} run ${run.status === 'cancelled' ? 'cancelled' : 'finished'} ${ended}: ${countsText(run.counts, locale)}.${reduction}`,
+      });
+    }
+    if (bulk.scanRunning) blocks.push({ type: 'context', text: 'Runs start once the scan has finished.' });
+    const elements = startButtons(view, bulk, mutations, locale);
+    if (elements.length > 0) blocks.push({ type: 'actions', elements });
+  }
+
+  if (run && run.attention.length > 0) {
+    blocks.push({
+      type: 'table',
+      block_id: 'bulk-attention',
+      columns: [
+        { key: 'file', label: 'File' },
+        { key: 'outcome', label: 'Outcome', format: 'badge' },
+        { key: 'why', label: 'Why' },
+      ],
+      rows: run.attention.map((item) => ({
+        file: item.filename,
+        outcome: BULK_STATE_LABELS[item.state],
+        why: (item.code ? BULK_ITEM_EXPLANATIONS[item.code] : undefined) ?? item.message ?? '',
+      })),
+      page_action_id: ACTION_BULK_ATTENTION_PAGE,
+    });
+  }
+
+  if (bulk.automation.enabled) {
+    const queue = bulk.automation.counts ? countsText(bulk.automation.counts, locale) : 'empty';
+    blocks.push({
+      type: 'context',
+      text: `Upload automation is on: new uploads are queued and optimized in the background, never during the upload. Queue: ${queue}.`,
+    });
+    blocks.push({ type: 'actions', elements: [{ type: 'button', action_id: ACTION_BULK_RECONCILE, label: 'Find missed uploads' }] });
+  } else {
+    blocks.push({
+      type: 'context',
+      text: 'Upload automation is off. Switch on “Optimize new uploads” in the settings to queue new uploads automatically.',
+    });
+  }
+  return blocks;
 }
 
 /** Whether apply and restore are allowed, why not, and the images this plugin optimized. */
@@ -634,6 +939,9 @@ function mutationBlocks(mutations: MutationsView, locale: string): Block[] {
       type: 'context',
       text: `${mutations.apply ? 'Apply replaces one image in place with its optimized output, only when the saving reaches both thresholds (and never less than 10 KiB and 5%) and the image has not changed since it was read.' : 'Applying is not available.'} The host keeps every original, and Restore puts it back byte for byte. ${mutations.message}`,
     });
+  }
+  if (mutations.accounting.retainedOriginalBytes > 0 || mutations.accounting.optimized > 0) {
+    blocks.push(...accountingBlocks(mutations.accounting, locale));
   }
   if (mutations.optimized.length === 0) return blocks;
   blocks.push({
@@ -680,6 +988,7 @@ export function reportPage(view: ReportView, toast?: BlockResponse['toast']): Bl
     });
     if (view.native) blocks.push(...nativeSettingsBlocks(view.native));
     if (view.mutations) blocks.push(...mutationBlocks(view.mutations, locale));
+    if (view.mutations && view.bulk) blocks.push(...bulkBlocks(view, view.bulk, view.mutations, locale));
     return { blocks, ...(toast ? { toast } : {}) };
   }
 
@@ -709,6 +1018,7 @@ export function reportPage(view: ReportView, toast?: BlockResponse['toast']): Bl
   });
   if (view.native) blocks.push(...nativeSettingsBlocks(view.native));
   if (view.mutations) blocks.push(...mutationBlocks(view.mutations, locale));
+  if (view.mutations && view.bulk) blocks.push(...bulkBlocks(view, view.bulk, view.mutations, locale));
 
   blocks.push({ type: 'divider' });
   blocks.push({
