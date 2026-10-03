@@ -27,11 +27,19 @@
 // 127.0.0.1 in front of the site (`proxy.mjs`: a `caddy` binary, or a container of the image on the
 // host's network) and sends every request of the run to the proxy instead of the site's port. The
 // site's URL and the passkeys' origin are then the proxy's. It checks besides that the proxy's
-// configuration only passes requests on, and that every response measured came through it.
+// configuration only passes requests on, and that every response measured came through it. It also
+// starts a second Caddy that serves the uploads directory as files (`--static-port`), which the
+// recommended setup never does, to record what such a mount exposes after each change.
+//
+// Public storage. The host must carry host patch 0010 (public active revision); an older host fails
+// the run. After each change the uploads directory is scanned against the database
+// (`public-storage.mjs`). `--migrate-from <pilot at the previous patch level>` first optimizes an
+// image on that host, switches the site to the host under test and waits for its reconciliation to
+// bring the stable key in line.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { cpus, totalmem } from 'node:os';
@@ -42,8 +50,9 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { createClient, expectOk, inviteUser, logIn, setUpSite } from './http.mjs';
-import { build, buildSite, createSite, installedPluginVersion, installPlugin, packHost, packPlugin, startSite, useBuildWrapper } from './site.mjs';
-import { assertPassThrough, startCaddy } from './proxy.mjs';
+import { build, buildSite, createSite, hostRecordsPublicCleanups, installedPluginVersion, installHost, installPlugin, packHost, packPlugin, startSite, useBuildWrapper } from './site.mjs';
+import { assertPassThrough, startCaddy, startStaticMount } from './proxy.mjs';
+import { scanPublicStorage } from './public-storage.mjs';
 import { createSystemdRunner } from './systemd.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -65,6 +74,8 @@ const { values: args } = parseArgs({
     proxy: { type: 'string', default: 'none' },
     'proxy-port': { type: 'string' },
     'proxy-image': { type: 'string' },
+    'static-port': { type: 'string' },
+    'migrate-from': { type: 'string' },
   },
 });
 
@@ -86,6 +97,8 @@ const paths = {
 if (!['none', 'caddy'].includes(args.proxy)) throw new Error(`Unknown proxy ${args.proxy}`);
 const proxied = args.proxy === 'caddy';
 const proxyPort = Number(args['proxy-port'] ?? Number(args.port) + 1);
+/** With a proxy, a file server on the uploads directory for the direct-serving check, and one more port for its control. */
+const staticPort = Number(args['static-port'] ?? proxyPort + 1);
 /** Where the site listens, and where the run sends its requests: the proxy when there is one. */
 const siteOrigin = `http://127.0.0.1:${Number(args.port)}`;
 const origin = proxied ? `http://127.0.0.1:${proxyPort}` : siteOrigin;
@@ -323,6 +336,7 @@ async function heavyFixtures(sharp) {
 
 let site = null;
 let proxy = null;
+let staticMount = null;
 /** The profile the host reports, read from the plugin's refusal while nothing is allowed. */
 let qualifiedProfile = null;
 /** The profile the media host adapter qualifies by default; the host must report exactly this. */
@@ -424,6 +438,122 @@ function checkDataPermissions(label) {
   };
 }
 
+// --- Public storage: what the uploads directory holds ----------------------------------------------
+
+/**
+ * How long a published operation may lack its recorded public cleanup. The host cleans up before
+ * the operation answers, so the scan normally finds nothing owed; the wait is recorded.
+ */
+const CLEANUP_BOUND_MS = 5_000;
+/**
+ * How long the host may take to clean up after an operation published without it (by an earlier
+ * patch level, or interrupted): its reconciliation acts once the operation is 10 minutes old, on a
+ * maintenance tick, which comes at least once a minute.
+ */
+const RECONCILIATION_BOUND_MS = 12 * 60_000;
+
+/** Digests of the last active revisions of media this run deleted; see `scanPublicStorage`. */
+const leftoverDigests = new Set();
+/** Every public storage check of the run, in order, for the evidence. */
+const publicStorageChecks = [];
+
+const scanUploads = () => scanPublicStorage({ databasePath: paths.database, uploadsDirectory: paths.uploads, leftoverDigests });
+
+/**
+ * Through the file server on the uploads directory: every file there is served as it is on disk,
+ * and none of the answers is a retained original that is not an active revision.
+ */
+async function checkStaticMount(label, scan) {
+  let requests = 0;
+  for (const [key, digest] of scan.digests) {
+    const response = await fetch(`${staticMount.origin}/${key.split('/').map(encodeURIComponent).join('/')}`);
+    const served = sha256(Buffer.from(await response.arrayBuffer()));
+    assert.equal(response.status, 200, `${label}: the static mount does not serve ${key}`);
+    assert.equal(served, digest, `${label}: the static mount serves other bytes than the file ${key}`);
+    assert.ok(!scan.retainedNotActive.has(served), `${label}: the static mount serves a retained original at ${key}`);
+    requests += 1;
+  }
+  for (const item of scan.managed) {
+    const response = await fetch(`${staticMount.origin}/${item.storage_key.split('/').map(encodeURIComponent).join('/')}`);
+    assert.equal(sha256(Buffer.from(await response.arrayBuffer())), item.sha256, `${label}: the static mount does not serve the active revision at ${item.storage_key}`);
+    requests += 1;
+  }
+  return { requests, servedActiveRevisions: scan.managed.length, servedRetainedOriginals: 0 };
+}
+
+/**
+ * The uploads directory against the database: every managed item's stable key and its one revision
+ * object hold the active revision, no file holds a retained original that is not active, no
+ * temporary or superseded object is left, and every published operation has its cleanup recorded,
+ * within the bound. With a static mount, the same through it.
+ */
+async function checkPublicStorage(label) {
+  const begin = performance.now();
+  let scan = scanUploads();
+  let waited = 0;
+  while (scan.pendingCleanups > 0 && performance.now() - begin < CLEANUP_BOUND_MS) {
+    await sleep(100);
+    scan = scanUploads();
+    waited = Math.round(performance.now() - begin);
+  }
+  assert.deepEqual(scan.problems, [], `${label}: public storage is not in line with the publications`);
+  const result = {
+    after: label,
+    filesScanned: scan.digests.size,
+    managedMedia: scan.managed.length,
+    revisionObjects: scan.revisionObjects,
+    retainedOriginals: scan.retained.size,
+    leftoversOfDeletedMedia: scan.leftovers,
+    pendingCleanups: scan.pendingCleanups,
+    cleanupWaitMs: waited,
+    ...(staticMount ? { staticMount: await checkStaticMount(label, scan) } : {}),
+  };
+  publicStorageChecks.push(result);
+  return result;
+}
+
+/** Runs statements against the host's recovery entry point, with the site stopped; returns the JSON they print last. */
+function runRecovery(statements) {
+  const script = `
+    import { openSafeMediaRecovery } from 'emdash/media/safe-recovery';
+    const recovery = await openSafeMediaRecovery(${JSON.stringify({ databasePath: paths.database, uploadsDirectory: paths.uploads, privateDirectory: paths.private })});
+    ${statements}
+    await recovery.close();
+  `;
+  // Under systemd, as the site user in a unit with the site's caps and sandbox, so that what it
+  // writes belongs to the site user.
+  const output = hosted ? hosted.recover(script) : execFileSync(process.execPath, ['--input-type=module', '-e', script], { cwd: paths.site, encoding: 'utf8' });
+  return JSON.parse(output.trim().split('\n').at(-1));
+}
+
+/**
+ * Reconciliation through the recovery entry point with the site stopped, repeated until a run finds
+ * nothing to do, as the host patches' README describes. Nothing may be owed afterwards.
+ */
+function reconcileStopped(label) {
+  const { reports } = runRecovery(`
+    const reports = [];
+    let report;
+    do {
+      report = await recovery.reconcile({ graceMs: 0 });
+      reports.push(report);
+    } while (reports.length < 10 && report.operations.length + report.mirroredStableKeys.length + report.removedSupersededObjects.length > 0);
+    console.log(JSON.stringify({ reports }));
+  `);
+  const last = reports.at(-1);
+  assert.equal(last.pendingPublicCleanups, 0, `${label}: reconciliation still owes public cleanups`);
+  assert.notEqual(last.complete, false, `${label}: reconciliation did not finish`);
+  const total = (field) => reports.reduce((sum, report) => sum + (report[field]?.length ?? 0), 0);
+  return {
+    runs: reports.length,
+    pendingPublicCleanups: last.pendingPublicCleanups,
+    mirroredStableKeys: total('mirroredStableKeys'),
+    removedSupersededObjects: total('removedSupersededObjects'),
+    removedCandidateObjects: total('removedCandidateObjects'),
+    interruptedOperations: total('operations'),
+  };
+}
+
 // --- Plugin calls --------------------------------------------------------------------------------
 
 let admin;
@@ -484,21 +614,28 @@ async function main() {
     await rm(work, { recursive: true, force: true });
   }
   for (const directory of [paths.packages, paths.logs]) await mkdir(directory, { recursive: true });
-  if (hosted) {
-    // The layout an operator prepares: one data directory for the site user, nothing for others.
-    for (const directory of [paths.data, paths.uploads, paths.private, paths.staging, paths.sessions]) hosted.prepareDirectory(directory);
-  } else {
-    await mkdir(paths.uploads, { recursive: true });
-  }
+  const prepareData = async () => {
+    if (hosted) {
+      // The layout an operator prepares: one data directory for the site user, nothing for others.
+      for (const directory of [paths.data, paths.uploads, paths.private, paths.staging, paths.sessions]) hosted.prepareDirectory(directory);
+    } else {
+      await mkdir(paths.uploads, { recursive: true });
+    }
+  };
+  await prepareData();
 
   // 1. Packages: the patched host, the plugin, and the plugin under a bumped version for the upgrade.
   const host = reuse ? reusedHost(resolve(args.pilot)) : packHost(resolve(args.pilot), paths.packages);
   let patches = null;
+  let previousTree = null;
   if (args['patch-manifest']) {
     const manifest = JSON.parse(await readFile(args['patch-manifest'], 'utf8'));
     const last = manifest.patches.at(-1);
     assert.equal(host.tree, last.resultingTree, `The pilot tree ${host.tree} is not the tree of ${last.name}`);
     patches = manifest.patches.map((patch) => patch.name);
+    // The public storage checks below describe a host with patch 0010; an older one fails here.
+    assert.ok(patches.some((name) => name.startsWith('0010-public-active-revision')), `The host lacks patch 0010 (public active revision); its last patch is ${last.name}`);
+    previousTree = manifest.patches.at(-2)?.resultingTree ?? null;
   }
   let plugin;
   if (reuse) {
@@ -544,6 +681,84 @@ async function main() {
     });
   }
 
+  if (!reuse) assert.ok(hostRecordsPublicCleanups(paths.site), 'The installed host does not record public storage cleanups: it lacks patch 0010');
+
+  if (args['migrate-from']) {
+    // An image optimized on the previous patch level keeps its original at the stable key. The host
+    // under test must bring that in line by itself: its reconciliation, on a maintenance tick once
+    // the operation is past the grace period.
+    assert.ok(!reuse, '--migrate-from needs a full run, not --reuse-packages');
+    await mkdir(join(paths.packages, 'previous'), { recursive: true });
+    const previous = packHost(resolve(args['migrate-from']), join(paths.packages, 'previous'));
+    if (previousTree) assert.equal(previous.tree, previousTree, `The previous pilot tree ${previous.tree} is not the tree of the patch before the last`);
+    assert.notEqual(previous.tree, host.tree, 'the previous pilot is the pilot under test');
+    installHost(paths.site, previous.tarball);
+    assert.ok(!hostRecordsPublicCleanups(paths.site), 'the previous host already records public storage cleanups');
+    qualifiedProfile = SHIPPED_PROFILE;
+    await restartAs('native', 'previous host patch level');
+    ({ client: admin, passkey: adminPasskey } = await setUpSite(origin, { title: 'Image optimizer migration', email: 'admin@example.test' }));
+    const [fixture] = await fixtures(sharp, 1);
+    const form = new FormData();
+    form.set('file', new Blob([fixture.bytes], { type: 'image/jpeg' }), fixture.name);
+    const uploaded = expectOk(await admin.request('POST', '/_emdash/api/media', { form }), 'upload for the migration').item;
+    const originalSha = sha256(fixture.bytes);
+    const applied = await route('apply', { mediaId: uploaded.id });
+    assert.equal(applied.outcome, 'optimized', JSON.stringify(applied));
+    const publishedAt = Date.now();
+    const optimizedSha = activeRevision(uploaded.id).sha256;
+    const stableKeyFile = join(paths.uploads, uploaded.storageKey);
+    const onDisk = () => sha256(readFileSync(stableKeyFile));
+    assert.equal(onDisk(), originalSha, 'on the previous patch level the stable key was expected to keep the original');
+    assert.equal((await fetchBytes(fileUrl(uploaded.storageKey))).sha256, optimizedSha);
+
+    await stopSite();
+    installHost(paths.site, host.tarball);
+    assert.ok(hostRecordsPublicCleanups(paths.site), 'the host under test was not installed');
+    await restartAs('native', 'host under test, on the data of the previous patch level');
+    const upgradedAt = Date.now();
+    await logIn(admin, adminPasskey);
+    const owedAtStart = scanUploads().pendingCleanups;
+    assert.equal((await fetchBytes(fileUrl(uploaded.storageKey))).sha256, optimizedSha);
+    const cleaned = await waitFor('the stable key of the migrated image', () => (onDisk() === optimizedSha ? Date.now() : null), { timeoutMs: RECONCILIATION_BOUND_MS, intervalMs: 5_000 });
+    const migrated = await checkPublicStorage('migration from the previous patch level');
+    assert.ok(!Object.values(filesUnder(paths.uploads)).includes(originalSha), 'the original is still in the uploads directory after the migration');
+    const restoredAfter = await route('restore', { mediaId: uploaded.id });
+    assert.equal(restoredAfter.outcome, 'restored', JSON.stringify(restoredAfter));
+    assert.equal((await fetchBytes(fileUrl(uploaded.storageKey))).sha256, originalSha);
+    passed('an image optimized on the previous patch level is cleaned by the host under test', {
+      previousTree: previous.tree,
+      stableKeyHeldOriginalBefore: true,
+      cleanupsOwedAtStart: owedAtStart,
+      secondsFromPublicationToCleanStableKey: Math.round((cleaned - publishedAt) / 1000),
+      secondsFromStartOfTheHostUnderTest: Math.round((cleaned - upgradedAt) / 1000),
+      boundSecondsFromStart: RECONCILIATION_BOUND_MS / 1000,
+      publicStorage: migrated,
+      restoreAfterwards: restoredAfter.outcome,
+    });
+
+    // The main run starts from an empty site.
+    await stopSite();
+    await rm(paths.data, { recursive: true, force: true });
+    await prepareData();
+    publicStorageChecks.length = 0;
+    qualifiedProfile = null;
+  }
+
+  if (proxied) {
+    // What the recommended setup never has: a file server on the uploads directory. It needs read
+    // access to the directory; under systemd that is the site user's alone, so it runs as that user.
+    staticMount = await startStaticMount({
+      port: staticPort,
+      uploadsDirectory: paths.uploads,
+      directory: join(work, 'static'),
+      image: args['proxy-image'] ?? null,
+      name: `${args.unit ?? args['site-user'] ?? 'image-optimizer-qualification'}-static`,
+      logFile: join(paths.logs, 'static.log'),
+      user: hosted ? `${hosted.uid}:${hosted.gid}` : null,
+    });
+    assert.ok(staticMount.config.handlers.includes('file_server') && staticMount.config.listen.every((address) => address.startsWith('127.0.0.1:')));
+  }
+
   // 2. Discovery: the native edition with an empty qualified list reports the host's profile and stays read-only.
   await restartAs('native', 'native edition, empty qualified list');
   ({ client: admin, passkey: adminPasskey } = await setUpSite(origin, { title: 'Image optimizer qualification', email: 'admin@example.test' }));
@@ -558,6 +773,41 @@ async function main() {
   }
   const [A, B, C, D, E, F, G, H, I, J, K] = Object.values(images);
   passed('fixtures uploaded', { count: Object.keys(images).length, bytes: Object.values(images).map((image) => image.originalBytes) });
+  passed('public storage before any change: the host records cleanups, every upload at its key', await checkPublicStorage('upload'));
+
+  if (staticMount) {
+    let asOtherUser = null;
+    if (hosted && args['proxy-image']) {
+      // The same file server as another unprivileged user cannot read the directory: serving
+      // uploads directly takes a deliberate grant of access.
+      const other = await startStaticMount({
+        port: staticPort + 1,
+        uploadsDirectory: paths.uploads,
+        directory: join(work, 'static-other'),
+        image: args['proxy-image'],
+        name: `${args.unit ?? args['site-user']}-static-other`,
+        logFile: join(paths.logs, 'static-other.log'),
+        user: '65534:65534',
+      });
+      try {
+        const refused = await fetch(`${other.origin}/${A.storageKey}`);
+        assert.notEqual(refused.status, 200, 'a file server running as another user read the uploads directory');
+        assert.notEqual(sha256(Buffer.from(await refused.arrayBuffer())), A.originalSha);
+        asOtherUser = refused.status;
+      } finally {
+        await other.stop();
+      }
+    }
+    const served = await fetch(`${staticMount.origin}/${A.storageKey}`);
+    assert.equal(sha256(Buffer.from(await served.arrayBuffer())), A.originalSha, 'the static mount does not serve the uploads directory');
+    passed('a file server on the uploads directory is in place for the direct-serving check', {
+      server: staticMount.name,
+      version: staticMount.version,
+      listens: 'loopback only',
+      readsTheDirectoryAs: hosted ? 'the site user' : 'the user running the script',
+      sameServerAsAnotherUser: asOtherUser,
+    });
+  }
 
   if (hosted) {
     const cgroup = checkUnit('first start');
@@ -692,6 +942,14 @@ async function main() {
   assert.deepEqual(editorial(mediaRow(A.id)), editorialBefore);
   const servedOptimized = await fetchBytes(fileUrl(A.storageKey));
   assert.equal(servedOptimized.bytes.length, applied.outputBytes);
+  // On disk too: the file at the stable key is the published candidate, not the upload.
+  const onDisk = (key) => sha256(readFileSync(join(paths.uploads, key)));
+  const originalInUploads = () => Object.entries(filesUnder(paths.uploads)).filter(([, digest]) => digest === A.originalSha).map(([path]) => path);
+  const storageAfterApply = await checkPublicStorage('first apply');
+  assert.equal(operations(A.id).at(-1).candidate_sha256, optimizedRevision.sha256);
+  assert.equal(onDisk(A.storageKey), optimizedRevision.sha256, 'the stable key does not hold the applied revision');
+  assert.deepEqual(originalInUploads(), [], 'the original is still in the uploads directory');
+  passed('public storage in line after the first apply', { ...storageAfterApply, stableKeyHoldsCandidate: true, originalCopiesInUploads: 0 });
   passed('apply serves the new bytes at the same URL', {
     mediaId: A.id,
     url: fileUrl(A.storageKey),
@@ -704,12 +962,8 @@ async function main() {
     editorialKept: Object.keys(editorialBefore),
   });
 
-  // The original: kept privately, not in public storage, not reachable through any public route.
-  // The host keeps the uploaded file as the baseline revision's object at its stable key in the
-  // uploads directory; only the file route, which resolves the key to the active revision, keeps it
-  // from being served. Recorded, so the docs can say the directory must not be served directly.
-  const publicFiles = filesUnder(paths.uploads);
-  const originalInUploads = Object.entries(publicFiles).filter(([, digest]) => digest === A.originalSha).map(([path]) => path);
+  // The original: kept privately, not in public storage (checked above), not reachable through any
+  // public route.
   assert.ok(Object.values(filesUnder(paths.private)).includes(A.originalSha), 'The original is not in the private store');
   const original = query('SELECT storage_key FROM _emdash_media_originals WHERE sha256 = ?', A.originalSha)[0];
   assert.ok(original, 'No original record');
@@ -733,14 +987,12 @@ async function main() {
     assert.notEqual(got.sha256, A.originalSha, `The original is served at ${path}`);
     probeResults.push({ path: path.replace(A.id, '<media>').replace(original.storage_key, '<original key>'), status: got.status });
   }
-  // Where a web server or proxy that served files would expose them: the paths of the stored files
-  // that hold the original, in the uploads directory and in the private store, under likely static
+  // Where a web server or proxy that served files would expose them: the path of the private copy
+  // of the original, and of the stable key that held it before the apply, under likely static
   // prefixes and as absolute paths. None may answer with the original.
-  const storedOriginals = [
-    ...originalInUploads.map((path) => join(paths.uploads, path)),
-    ...Object.entries(filesUnder(paths.private)).filter(([, digest]) => digest === A.originalSha).map(([path]) => join(paths.private, path)),
-  ];
-  assert.ok(storedOriginals.some((path) => path.startsWith(paths.uploads)) && storedOriginals.some((path) => path.startsWith(paths.private)), 'the original is not stored in both directories');
+  const privateCopies = Object.entries(filesUnder(paths.private)).filter(([, digest]) => digest === A.originalSha).map(([path]) => join(paths.private, path));
+  assert.ok(privateCopies.length > 0);
+  const storedOriginals = [join(paths.uploads, A.storageKey), ...privateCopies];
   const staticPrefixes = ['', 'uploads', 'data/uploads', 'media', 'files', 'static', 'assets', 'public', 'private', 'data/private', 'originals', 'data', '_emdash/uploads', '_emdash/media'];
   const staticStatuses = {};
   let staticProbes = 0;
@@ -763,9 +1015,9 @@ async function main() {
   if (hosted) passed('retained originals belong to the site user alone', checkDataPermissions('after apply'));
   passed('original not publicly reachable', {
     privateStoreHoldsOriginal: true,
-    uploadsDirectoryHoldsOriginal: originalInUploads.map((path) => (path === A.storageKey ? '<stable key>' : '<other key>')),
+    originalCopiesInUploads: 0,
     probes: probeResults,
-    staticPathProbes: { storedCopies: storedOriginals.length, requests: staticProbes, statuses: staticStatuses, servedOriginal: 0 },
+    staticPathProbes: { paths: storedOriginals.length, privateCopies: privateCopies.length, requests: staticProbes, statuses: staticStatuses, servedOriginal: 0 },
   });
 
   const restored = await route('restore', { mediaId: A.id });
@@ -775,7 +1027,10 @@ async function main() {
   assert.equal(servedRestored.sha256, A.originalSha);
   assert.equal(restored.sha256, A.originalSha);
   assert.deepEqual(editorial(mediaRow(A.id)), editorialBefore);
-  passed('restore is byte-exact', { mediaId: A.id, servedSha256: servedRestored.sha256, revision: restored.revisionId });
+  passed('restore is byte-exact', { mediaId: A.id, servedSha256: servedRestored.sha256, revision: restored.revisionId, restoredFrom: 'the private store: no public copy of the original existed' });
+  const storageAfterRestore = await checkPublicStorage('restore');
+  assert.equal(onDisk(A.storageKey), restored.sha256, 'the stable key does not hold the restored original');
+  passed('public storage in line after restore', storageAfterRestore);
 
   // Re-optimization under another preset reads the original privately; the original never becomes active.
   const reapplied = await route('apply', { mediaId: A.id });
@@ -784,6 +1039,9 @@ async function main() {
   const transformedBalanced = (await fetchBytes(transformedUrl(A.storageKey))).sha256;
   const opsBefore = operations(A.id).length;
   expectOk(await admin.put(`/_emdash/api/admin/plugins/${PLUGIN}/settings`, { values: { preset: 'high-fidelity' } }), 'settings');
+  // The original the re-optimization reads exists only in the private store by now.
+  await checkPublicStorage('second apply');
+  assert.deepEqual(originalInUploads(), [], 'the original is in the uploads directory before the re-optimization');
   const reoptimized = await route('apply', { mediaId: A.id });
   assert.equal(reoptimized.outcome, 'optimized', JSON.stringify(reoptimized));
   delivery.push(await freshness('re-optimize', A.storageKey, { directNot: balancedRevision.sha256, transformedNot: transformedBalanced }));
@@ -803,10 +1061,16 @@ async function main() {
     fencedOn: balancedRevision.id,
     newRevision: hiFiRevision.id,
     hostOperationsSince: later.map((operation) => operation.kind),
+    originalReadFrom: 'the private store: no public copy of the original existed',
   });
+  const storageAfterReoptimize = await checkPublicStorage('re-optimize');
+  assert.equal(onDisk(A.storageKey), hiFiRevision.sha256, 'the stable key does not hold the re-optimized revision');
+  assert.deepEqual(originalInUploads(), []);
+  passed('public storage in line after re-optimization', storageAfterReoptimize);
   const backToOriginal = await route('restore', { mediaId: A.id });
   assert.equal(backToOriginal.outcome, 'restored');
   assert.equal((await fetchBytes(fileUrl(A.storageKey))).sha256, A.originalSha);
+  assert.equal(onDisk(A.storageKey), A.originalSha);
   expectOk(await admin.put(`/_emdash/api/admin/plugins/${PLUGIN}/settings`, { values: { preset: 'balanced' } }), 'settings');
 
   const bulkApply = await bulkToCompletion('bulk apply', { kind: 'apply', mediaIds: [B.id, C.id, D.id] });
@@ -817,10 +1081,17 @@ async function main() {
     assert.equal((await fetchBytes(fileUrl(image.storageKey))).sha256, active.sha256);
   }
   passed('bulk apply', { runId: bulkApply.runId, counts: bulkApply.counts, grossReductionBytes: bulkApply.grossReductionBytes });
+  const storageAfterBulkApply = await checkPublicStorage('bulk apply');
+  for (const image of [B, C, D]) assert.equal(onDisk(image.storageKey), activeRevision(image.id).sha256);
+  assert.ok(![B, C, D].some((image) => Object.values(filesUnder(paths.uploads)).includes(image.originalSha)), 'an original of the bulk apply is in the uploads directory');
+  passed('public storage in line after bulk apply', storageAfterBulkApply);
   const bulkRestore = await bulkToCompletion('batch restore', { kind: 'restore', mediaIds: [B.id, C.id, D.id] });
   assert.equal(bulkRestore.counts.restored, 3, JSON.stringify(bulkRestore));
   for (const image of [B, C, D]) assert.equal((await fetchBytes(fileUrl(image.storageKey))).sha256, image.originalSha);
   passed('batch restore is byte-exact', { runId: bulkRestore.runId, counts: bulkRestore.counts });
+  const storageAfterBatchRestore = await checkPublicStorage('batch restore');
+  for (const image of [B, C, D]) assert.equal(onDisk(image.storageKey), image.originalSha);
+  passed('public storage in line after batch restore', storageAfterBatchRestore);
   assert.deepEqual(filesUnder(paths.staging), {}, 'staging is not empty');
 
   // 4. Authorization: without a session, as an editor, without the CSRF header, cross-origin, with a bad token.
@@ -961,20 +1232,16 @@ async function main() {
   }
   assert.equal((await fetchBytes(fileUrl(I.storageKey))).sha256, iOptimized.sha256);
   await stopSite();
-  const recoveryScript = `
-    import { openSafeMediaRecovery } from 'emdash/media/safe-recovery';
-    const recovery = await openSafeMediaRecovery(${JSON.stringify({ databasePath: paths.database, uploadsDirectory: paths.uploads, privateDirectory: paths.private })});
+  const recovered = runRecovery(`
     const listed = await recovery.listRestorableOriginals(${JSON.stringify(I.id)});
     const restored = await recovery.restoreMedia(${JSON.stringify(I.id)});
-    await recovery.close();
     console.log(JSON.stringify({ listed, restored }));
-  `;
-  // Under systemd, as the site user in a unit with the site's caps and sandbox, so that what it
-  // writes belongs to the site user.
-  const recovery = hosted
-    ? hosted.recover(recoveryScript)
-    : execFileSync(process.execPath, ['--input-type=module', '-e', recoveryScript], { cwd: paths.site, encoding: 'utf8' });
-  const recovered = JSON.parse(recovery.trim().split('\n').at(-1));
+  `);
+  // With the site stopped, the host's own reconciliation report: nothing owed in public storage.
+  const reconciledStopped = reconcileStopped('after host recovery');
+  const storageAfterRecovery = await checkPublicStorage('host recovery with the site stopped');
+  assert.equal(sha256(readFileSync(join(paths.uploads, I.storageKey))), I.originalSha, 'the stable key does not hold the original the host recovery restored');
+  passed('public storage in line after host recovery, and reconciliation owes nothing', { ...storageAfterRecovery, reconciliation: reconciledStopped });
   await restartAs('none', 'plugin unregistered, after host recovery');
   assert.equal((await fetchBytes(fileUrl(I.storageKey))).sha256, I.originalSha);
   assert.deepEqual(pluginRows(), rowsBeforeRemoval, 'plugin data changed while unregistered');
@@ -998,8 +1265,43 @@ async function main() {
   assert.equal((await fetchBytes(fileUrl(E.storageKey))).sha256, E.originalSha);
   assert.equal((await fetchBytes(fileUrl(K.storageKey))).sha256, K.originalSha);
   passed('reinstall keeps data continuity', { pluginRows: pluginRows(), restoreAfterHostRecovery: afterRecovery.outcome, laterRestore: finalE.outcome });
-  if (hosted) passed('site data still belongs to the site user alone at the end', checkDataPermissions('at the end'));
+
+  // 9. Deleting optimized images. `J` is deleted while optimized: its last revision was never an
+  // original. `K` is deleted after an apply and a restore: its last revision is its original, which
+  // the host retains, so no public object may keep it.
+  for (const image of [J, K]) assert.equal((await route('apply', { mediaId: image.id })).outcome, 'optimized');
+  assert.equal((await route('restore', { mediaId: K.id })).outcome, 'restored');
+  await checkPublicStorage('before deleting');
+  for (const image of [J, K]) {
+    leftoverDigests.add(activeRevision(image.id).sha256);
+    expectOk(await admin.request('DELETE', `/_emdash/api/media/${image.id}`), `delete ${image.name ?? image.id}`);
+    assert.equal(mediaRow(image.id), undefined, 'the media row is still there after the delete');
+    assert.ok(!existsSync(join(paths.uploads, image.storageKey)), 'the stable key of a deleted image is still in the uploads directory');
+    assert.notEqual((await fetchBytes(fileUrl(image.storageKey))).status, 200);
+  }
+  // Until reconciliation, the only thing owed is the object of the deleted image's original.
+  const owedAfterDelete = scanUploads().problems;
+  assert.ok(owedAfterDelete.every((problem) => problem.includes(K.originalSha)), `after the deletes: ${JSON.stringify(owedAfterDelete)}`);
   await stopSite();
+  const reconciledAtEnd = reconcileStopped('at the end');
+  const storageAtEnd = await checkPublicStorage('delete, then reconciliation with the site stopped');
+  const publicDigests = Object.values(filesUnder(paths.uploads));
+  for (const image of [J, K]) assert.ok(!publicDigests.includes(image.originalSha), 'the original of a deleted image is in the uploads directory');
+  passed('deleting optimized images leaves no original in public storage', {
+    deleted: 2,
+    stableKeysRemoved: 2,
+    problemsBeforeReconciliation: owedAfterDelete.length,
+    reconciliation: reconciledAtEnd,
+    ...storageAtEnd,
+  });
+  passed('public storage stayed in line through the run', {
+    checks: publicStorageChecks.length,
+    maxFilesScanned: Math.max(...publicStorageChecks.map((check) => check.filesScanned)),
+    maxCleanupWaitMs: Math.max(...publicStorageChecks.map((check) => check.cleanupWaitMs)),
+    cleanupBoundMs: CLEANUP_BOUND_MS,
+    staticMountRequests: staticMount ? publicStorageChecks.reduce((sum, check) => sum + (check.staticMount?.requests ?? 0), 0) : null,
+  });
+  if (hosted) passed('site data still belongs to the site user alone at the end', checkDataPermissions('at the end'));
   if (hosted) {
     passed('no unit of the run reached its memory limit', {
       unitsStarted: unitMemory.length,
@@ -1056,6 +1358,14 @@ try {
     proxy: proxy
       ? { name: proxy.name, version: proxy.version, listens: 'loopback only', handlers: proxy.config.handlers, fileSystemRoots: proxy.config.roots.length, adminEndpoint: proxy.config.admin }
       : null,
+    publicStorage: {
+      cleanupBoundMs: CLEANUP_BOUND_MS,
+      reconciliationBoundMs: RECONCILIATION_BOUND_MS,
+      staticMount: staticMount
+        ? { server: staticMount.name, version: staticMount.version, listens: 'loopback only', readsTheDirectoryAs: hosted ? 'the site user' : 'the user running the script' }
+        : null,
+      checks: publicStorageChecks,
+    },
     runtime: hosted
       ? {
           runner: 'systemd transient service under its own system user, one process per site',
@@ -1093,5 +1403,6 @@ try {
   process.exitCode = 1;
 } finally {
   await stopSite().catch(() => {});
+  await staticMount?.stop().catch(() => {});
   await proxy?.stop().catch(() => {});
 }

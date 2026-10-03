@@ -125,8 +125,11 @@ are unavailable, and the routes answer `unavailable` and change nothing.
 
 - **One process per site.** The locks are in the process; two processes on the same data can
   interleave replacements. The host reports `locks: 'in-process'` from each of them.
-- **Media served only through the site.** Originals stay in the uploads directory at their public
-  keys; anything serving that directory directly would serve them.
+- **Media served only through the site.** With host patches up to 0009, originals stay in the uploads
+  directory at their public keys, and anything serving that directory directly serves them. Host
+  patch 0010 moves them out (see
+  [What the uploads directory holds](#what-the-uploads-directory-holds)), within limits; serving
+  through the site remains the setup that was run.
 
 Both are part of the
 [hosted profile](#hosted-profile-node-on-the-host-one-systemd-service-per-site-native-edition-pilot)
@@ -367,13 +370,67 @@ without the proxy. That bounds the site and a proxy that does not cache: a CDN o
 front that ignores these headers, and pages prerendered at build time, keep the old image until they
 are purged or rebuilt, which these runs do not cover.
 
-**The original stays in the uploads directory.** When the host first replaces an image, it records
-the uploaded file, at its storage key, as the image's baseline revision and keeps it there; it also
-copies it to the private store. The file route resolves the key to the active revision, so the
-original is not served through EmDash, but anything that serves the uploads directory directly (a web
-server or proxy mounting it, a public bucket) would serve originals. Serve media only through the
-site; on this profile the data directory's mode 0700 also keeps a proxy running as another user from
-reading it.
+#### What the uploads directory holds
+
+**In the recorded runs (host patches 0001 to 0009), the original stays in the uploads directory.**
+When that host first replaces an image, it records the uploaded file, at its storage key, as the
+image's baseline revision and keeps it there; it also copies it to the private store. The file route
+resolves the key to the active revision, so the original is not served through EmDash, but anything
+that serves the uploads directory directly (a web server or proxy mounting it, a public bucket)
+serves originals.
+
+**Host patch 0010 changes that.** After each publication the host rewrites the file at the storage
+key with the active image and removes the superseded revision object, each only once the bytes they
+displace are verified in the private store. The uploads directory then holds, per replaced image,
+its storage key and one revision object, both the active image; originals exist only in the private
+store, which restore and re-optimization read as before. What remains, from the host patches'
+README:
+
+- The rewrite follows the commit. If the site stops in between, or the rewrite fails, the storage
+  key keeps the previous bytes (on a first optimization, the original) until the host's
+  reconciliation finishes it: on a maintenance tick, which comes at least once a minute, once the
+  operation is 10 minutes old.
+- Images optimized on a host without 0010 are cleaned the same way after the upgrade, so their
+  originals stay in the directory for at least those 10 minutes, and longer when there are more than
+  1000 of them per reconciliation run.
+- A cache the host does not know about (a CDN or proxy in front of the directory) keeps what it
+  cached, which may be an original.
+- A deleted image's last file stays in the directory unless it is a retained original.
+
+The qualification script checks this on disk, as root, reading the uploads directory and the
+database (`qualification/public-storage.mjs`), after the first apply, restore, re-optimization, bulk
+apply, batch restore, host recovery, and after deleting optimized images:
+
+- the file at each replaced image's storage key, and its one object under `media-revisions/`, have
+  the digest of the active revision;
+- no file anywhere in the directory has the digest of a retained original, unless it is that image's
+  active revision (a restored image's original is active again);
+- `media-revisions/` holds no other object and no `stable-*.tmp` file;
+- every published operation has its public cleanup recorded, allowing 5 seconds (the host does it
+  before the operation answers; the wait is recorded), and with the site stopped the host's
+  reconciliation reports no cleanup owed;
+- after deleting an optimized image, and one that was optimized and restored, their storage keys are
+  gone and, after reconciliation, no object holds an original;
+- restore and re-optimization still return the byte-exact original once no public copy exists.
+
+A host without patch 0010 fails the run instead of skipping these checks. With `--proxy caddy` the
+script also starts a second Caddy as a plain file server on the uploads directory, which the
+recommended setup never has, and fetches every file through it after each change: each answer must
+be the file on disk and never a retained original that is not active. On the systemd profile the
+directory is the site user's alone (0700), so that file server runs as the site user; the same
+server as another user is checked to be refused. An operator who serves uploads directly has to
+grant the reader that access deliberately. With `--migrate-from <pilot at the previous patch level>`
+the run first optimizes an image on the 0009 host, where the storage key keeps the original,
+switches the site to the 0010 host and waits for its reconciliation to rewrite the key, within 12
+minutes of the start.
+
+The scan's rules were each removed once and its tests failed. **These checks have not been run on
+the hosted profile yet: the numbers above and the evidence files are from host patches 0001 to 0009,
+and the results for 0010 (files scanned, cleanup wait, static mount, migration time) are pending.**
+
+Serve media only through the site in any case: it is the setup the runs cover, it does not depend on
+the cleanup having finished, and on this profile the data directory's mode 0700 keeps a proxy
+running as another user from reading it.
 
 Not covered: a caching proxy or CDN, TLS, a proxy other than the one below or on another machine, a
 persistent unit with `Restart=` and boot ordering (the runs use transient units), several sites on
@@ -513,7 +570,9 @@ before the upgrade each made the run fail.
    The processor limits were measured for 3 GiB and two CPUs; with other caps, measure again.
 7. **Reverse proxy:** pass every request to `127.0.0.1:<port>` and nothing else. Never serve the
    uploads directory (or any part of the data directory) from the proxy, with `root`, `alias` or a
-   static mount: it holds the originals of optimized images at their public keys (see above). With
+   static mount: before host patch 0010 it holds the originals of optimized images at their public
+   keys, and with 0010 it can still hold one until an interrupted cleanup is finished (see
+   [What the uploads directory holds](#what-the-uploads-directory-holds)). With
    nginx, a single `location / { proxy_pass http://127.0.0.1:4321; }` with the usual `Host` and
    forwarding headers; no `location` that points at the file system. A proxy cache must honour
    `Cache-Control: max-age=0, must-revalidate`, or be purged after apply and restore. The run
@@ -583,9 +642,12 @@ runs). The backup and restore commands above were not part of the run.
    image, in a unit with the site's caps and sandbox; a site needs it for every image the plugin
    optimized.
 
-Going back to an EmDash without the host patches, or without `safeMedia`, has not been exercised. Do
-not do it while any image has a replaced revision: restore every image first, since the stock file
-route serves whatever file is at the storage key.
+Going back to an EmDash without the host patches, or without `safeMedia`, has not been exercised. The
+stock file route serves whatever file is at the storage key. On a host without patch 0010 that is the
+original of every optimized image, so restore every image first. With 0010 it is the active image
+once nothing is owed: stop the site and run the host's reconciliation until it reports no pending
+public cleanup, as the host patches' README describes. The database carries the patches' migrations
+either way, and moving it back is not covered.
 
 ## Why it is read-only
 

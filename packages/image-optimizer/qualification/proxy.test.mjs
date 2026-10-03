@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { assertPassThrough, caddyfile, describeConfig } from './proxy.mjs';
+import { assertPassThrough, caddyfile, describeConfig, staticCaddyfile } from './proxy.mjs';
 
 const ports = { proxyPort: 4511, sitePort: 4510 };
 
@@ -78,6 +78,14 @@ test('a configuration that serves files, or listens beyond loopback, is refused'
     for (const part of [/not on loopback alone/, /file_server/, /file-system root/, /admin endpoint on/]) assert.match(error.message, part);
     return true;
   });
+});
+
+test('the static mount is a loopback file server on the uploads directory, which the pass-through check refuses', () => {
+  const text = staticCaddyfile({ port: 4512, root: '/srv/uploads' });
+  assert.match(text, /^http:\/\/127\.0\.0\.1:4512 \{\n\tbind 127\.0\.0\.1\n\troot \* \/srv\/uploads\n\tfile_server\n\}$/m);
+  assert.match(text, /admin off/);
+  assert.doesNotMatch(text, /reverse_proxy/);
+  assert.throws(() => assertPassThrough(describeConfig(servingUploads()), ports), /file_server/);
 });
 
 test('each single departure from pass-through is refused on its own', () => {

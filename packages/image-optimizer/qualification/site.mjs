@@ -109,6 +109,31 @@ export function installPlugin(siteDirectory, pluginTarball) {
   build('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', `image-optimizer@file:${pluginTarball}`], { cwd: siteDirectory });
 }
 
+/** Replaces the installed `emdash` with another build of the host (another patch level). */
+export function installHost(siteDirectory, hostTarball) {
+  build('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', `emdash@file:${hostTarball}`], { cwd: siteDirectory });
+}
+
+/**
+ * Whether the installed `emdash` build records public storage cleanups (host patch 0010): its
+ * built files name the column. Tells the two patch levels of a migration apart.
+ */
+export function hostRecordsPublicCleanups(siteDirectory) {
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (walk(path)) return true;
+      } else if (/\.(mjs|js|ts)$/.test(entry.name) && readFileSync(path, 'utf8').includes('public_cleaned_at')) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const root = join(siteDirectory, 'node_modules/emdash');
+  return ['dist', 'src'].some((directory) => existsSync(join(root, directory)) && walk(join(root, directory)));
+}
+
 export function installedPluginVersion(siteDirectory) {
   return JSON.parse(readFileSync(join(siteDirectory, 'node_modules/image-optimizer/package.json'), 'utf8')).version;
 }

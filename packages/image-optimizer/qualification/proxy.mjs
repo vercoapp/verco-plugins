@@ -87,28 +87,50 @@ export function assertPassThrough(description, { proxyPort, sitePort }) {
 }
 
 /**
- * Starts Caddy with the pass-through configuration and waits until it listens. `image` selects the
- * container form; `name` is the container's name. Returns the proxy's origin, Caddy's version, what
- * its configuration adapts to, and `stop()`.
+ * The opposite of the pass-through configuration, for one check only: a file server on loopback
+ * rooted at the uploads directory, as an operator serving media without the site would set up.
  */
-export async function startCaddy({ proxyPort, sitePort, directory, image = null, name = 'qualification-proxy', logFile }) {
+export function staticCaddyfile({ port, root }) {
+  return [
+    '{',
+    '\tadmin off',
+    '\tauto_https off',
+    '\tpersist_config off',
+    '}',
+    '',
+    `http://127.0.0.1:${port} {`,
+    '\tbind 127.0.0.1',
+    `\troot * ${root}`,
+    '\tfile_server',
+    '}',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Starts Caddy with a configuration and waits until it listens on the port. `image` selects the
+ * container form, with `name` as the container's name, `volumes` mounted besides the configuration
+ * and, with `user`, that numeric `uid:gid` instead of the image's root.
+ */
+async function launch({ port, config, directory, image, name, logFile, volumes = [], user = null }) {
   await mkdir(directory, { recursive: true });
   const configFile = join(directory, 'Caddyfile');
-  await writeFile(configFile, caddyfile({ proxyPort, sitePort }));
-  const origin = `http://127.0.0.1:${proxyPort}`;
+  await writeFile(configFile, config);
+  const origin = `http://127.0.0.1:${port}`;
 
-  const mounts = ['-v', `${configFile}:${CONFIG_IN_CONTAINER}:ro`];
+  const mounts = [`${configFile}:${CONFIG_IN_CONTAINER}:ro`, ...volumes].flatMap((volume) => ['-v', volume]);
+  // As another user Caddy has no home of its own to keep state in; it needs none here.
+  const identity = user ? ['--user', user, '-e', 'HOME=/tmp', '-e', 'XDG_DATA_HOME=/tmp/data', '-e', 'XDG_CONFIG_HOME=/tmp/config'] : [];
   const caddy = (args, options = {}) =>
     image
-      ? execFileSync('docker', ['run', '--rm', ...mounts, image, 'caddy', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options })
+      ? execFileSync('docker', ['run', '--rm', ...identity, ...mounts, image, 'caddy', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options })
       : execFileSync('caddy', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options });
   const configPath = image ? CONFIG_IN_CONTAINER : configFile;
 
   const version = caddy(['version']).trim().split(/\s+/)[0];
   const adapted = describeConfig(JSON.parse(caddy(['adapt', '--config', configPath, '--adapter', 'caddyfile'])));
 
-  // Nothing may answer on the proxy's port before the proxy starts: afterwards, whatever answers
-  // there is the proxy.
+  // Nothing may answer on the port before Caddy starts: afterwards, whatever answers there is it.
   const answers = async () => {
     try {
       await fetch(origin, { signal: AbortSignal.timeout(2_000), redirect: 'manual' });
@@ -117,13 +139,13 @@ export async function startCaddy({ proxyPort, sitePort, directory, image = null,
       return false;
     }
   };
-  if (await answers()) throw new Error(`Something already answers on the proxy's port`);
+  if (await answers()) throw new Error(`Something already answers on the port of ${name}`);
 
   await mkdir(join(logFile, '..'), { recursive: true });
   const log = createWriteStream(logFile, { flags: 'a' });
   const run = ['run', '--config', configPath, '--adapter', 'caddyfile'];
   const child = image
-    ? spawn('docker', ['run', '--rm', '--name', name, '--network', 'host', ...mounts, image, 'caddy', ...run], { stdio: ['ignore', 'pipe', 'pipe'] })
+    ? spawn('docker', ['run', '--rm', '--name', name, '--network', 'host', ...identity, ...mounts, image, 'caddy', ...run], { stdio: ['ignore', 'pipe', 'pipe'] })
     : spawn('caddy', run, { stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.pipe(log);
   child.stderr.pipe(log);
@@ -132,8 +154,8 @@ export async function startCaddy({ proxyPort, sitePort, directory, image = null,
     exited = { code, signal };
   });
   for (let attempt = 0; !(await answers()); attempt += 1) {
-    if (exited) throw new Error(`The proxy exited during startup (${JSON.stringify(exited)}); see ${logFile}`);
-    if (attempt === 120) throw new Error(`The proxy did not listen within 60 s; see ${logFile}`);
+    if (exited) throw new Error(`${name} exited during startup (${JSON.stringify(exited)}); see ${logFile}`);
+    if (attempt === 120) throw new Error(`${name} did not listen within 60 s; see ${logFile}`);
     await sleep(500);
   }
 
@@ -154,4 +176,32 @@ export async function startCaddy({ proxyPort, sitePort, directory, image = null,
       log.end();
     },
   };
+}
+
+/**
+ * Starts Caddy with the pass-through configuration and waits until it listens. `image` selects the
+ * container form; `name` is the container's name. Returns the proxy's origin, Caddy's version, what
+ * its configuration adapts to, and `stop()`.
+ */
+export function startCaddy({ proxyPort, sitePort, directory, image = null, name = 'qualification-proxy', logFile }) {
+  return launch({ port: proxyPort, config: caddyfile({ proxyPort, sitePort }), directory, image, name, logFile });
+}
+
+/**
+ * Starts the file server on the uploads directory, read-only. In the container form the directory
+ * is mounted read-only and Caddy runs as `user` (`uid:gid`), which must be able to read it: nothing
+ * about the directory's owner or mode is changed for this.
+ */
+export function startStaticMount({ port, uploadsDirectory, directory, image = null, name = 'qualification-static', logFile, user = null }) {
+  const root = image ? '/srv/uploads' : uploadsDirectory;
+  return launch({
+    port,
+    config: staticCaddyfile({ port, root }),
+    directory,
+    image,
+    name,
+    logFile,
+    volumes: image ? [`${uploadsDirectory}:${root}:ro`] : [],
+    user: image ? user : null,
+  });
 }
