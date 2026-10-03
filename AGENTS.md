@@ -64,10 +64,15 @@ descriptions follow the same publication rules as commits: no references to loca
   runner output format differs between versions, so scripts consume `run()` events, not text).
   `pnpm` may be missing: use `npx pnpm@10.18.3 <command>` (the upstream checkout needs
   `npx pnpm@11.9.0`).
-- Qualification evidence (`host/emdash/qualification/*.json`) is written only by a clean passing
-  run. Do not edit it by hand, and do not describe anything as supported or qualified beyond what that
-  evidence shows. Docs and READMEs must state limits plainly: this is a pilot, mutation is disabled by
-  default, only Node, SQLite and local storage are exercised, D1 is deferred.
+- Qualification evidence (`host/emdash/qualification/*.json` and
+  `packages/image-optimizer/qualification/*-latest.json`) is written only by a clean passing run of a
+  committed checkout. Do not edit it by hand, and do not describe anything as supported or qualified
+  beyond what that evidence shows. Docs and READMEs must state limits plainly: this is a pilot; the
+  image optimizer changes media only in its native edition, on a host built with these patches, with
+  `safeMedia` set, that reports the one profile in `QUALIFIED_HOST_PROFILES` (Node, SQLite, local
+  storage, one process per site); everywhere else, including published EmDash and the registry
+  edition, it is read-only; D1 is deferred. Add a profile to that list only with evidence from a run
+  on it.
 - Host patches are cumulative and tied to git trees. Change them only through the pilot worktree:
   `pnpm host:pilot`, edit `.upstream/emdash-pilot`, then `pnpm host:patch-export` and
   `pnpm host:qualify-patch`. `pnpm host:pilot-check` must pass. Never hand-edit a `.patch` file.
