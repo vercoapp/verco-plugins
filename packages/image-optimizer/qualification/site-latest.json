@@ -1,0 +1,677 @@
+{
+  "timestamp": "2026-10-03T05:23:31.640Z",
+  "node": "v22.16.0",
+  "hardware": {
+    "cpuModel": "AMD EPYC 9J45 128-Core Processor",
+    "visibleCpus": 4,
+    "cgroupCpuMax": "200000 100000",
+    "cgroupMemoryMax": "3221225472",
+    "cgroupSwapMax": "0",
+    "totalMemoryBytes": 8332910592,
+    "platform": "linux x64"
+  },
+  "profile": {
+    "runtime": "node",
+    "database": "sqlite",
+    "storage": "local",
+    "locks": "in-process",
+    "status": "provisional: not on the adapter qualified list"
+  },
+  "host": {
+    "emdashCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+    "emdashTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+    "patches": [
+      "0001-media-revisions-private-originals.patch",
+      "0002-bounded-output-validation.patch",
+      "0003-staged-replacement-receipts.patch",
+      "0004-fenced-writers-and-readers.patch",
+      "0005-interrupted-operation-reconciliation.patch",
+      "0006-byte-exact-restore.patch",
+      "0007-native-safe-media-access.patch",
+      "0008-read-retained-original.patch",
+      "0009-decoder-process-cleanup.patch"
+    ]
+  },
+  "plugin": {
+    "version": "0.1.0",
+    "upgradeVersion": "0.1.1-qualification"
+  },
+  "site": {
+    "adapter": "@astrojs/node standalone",
+    "database": "SQLite (node:sqlite)",
+    "storage": "local",
+    "binding": "127.0.0.1",
+    "dependencies": {
+      "@astrojs/node": "11.1.5",
+      "@astrojs/react": "6.0.5",
+      "astro": "7.3.2",
+      "emdash": "local tarball",
+      "image-optimizer": "local tarball",
+      "react": "19.2.4",
+      "react-dom": "19.2.4",
+      "sharp": "0.35.4"
+    }
+  },
+  "delivery": {
+    "events": [
+      {
+        "event": "apply",
+        "direct": {
+          "staleResponses": 0,
+          "msToFresh": 6,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "4d9ef7621a7901c118fd82600d2df1948f75f92781fdd3cde5f3cb4c49033830"
+        },
+        "transformed": {
+          "staleResponses": 0,
+          "msToFresh": 17.1,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "941742f978f24e1673d826f66bb5bc2af821ed3322da08a709a0ed3ec7ed6f34"
+        }
+      },
+      {
+        "event": "restore",
+        "direct": {
+          "staleResponses": 0,
+          "msToFresh": 15.5,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "caa44671dd5b1a5d363bc6a9dd08eafd9b15314f3c7bb3f6c4fa796e2e2e34b6"
+        },
+        "transformed": {
+          "staleResponses": 0,
+          "msToFresh": 18.1,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "a9c89f79770a996188ec420791b9c6d1c9e4d91e4b8637a663d05d15b91082e7"
+        }
+      },
+      {
+        "event": "re-optimize",
+        "direct": {
+          "staleResponses": 0,
+          "msToFresh": 5.1,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "fff06d73eef85b8905ea94a84e6b4d063290103e1b917a4f10986d4d119f188c"
+        },
+        "transformed": {
+          "staleResponses": 0,
+          "msToFresh": 27.4,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "f3496cf2c44c046e2822d097825ae4c52aa48147908f8579fb607f9ee119355f"
+        }
+      }
+    ],
+    "direct": {
+      "maxStaleResponses": 0,
+      "maxMsToFresh": 15.5,
+      "cacheControl": [
+        "public, max-age=0, must-revalidate"
+      ]
+    },
+    "transformed": {
+      "maxStaleResponses": 0,
+      "maxMsToFresh": 27.4,
+      "cacheControl": [
+        "public, max-age=0, must-revalidate"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "name": "site packages built",
+      "emdashCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+      "emdashTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+      "patches": [
+        "0001-media-revisions-private-originals.patch",
+        "0002-bounded-output-validation.patch",
+        "0003-staged-replacement-receipts.patch",
+        "0004-fenced-writers-and-readers.patch",
+        "0005-interrupted-operation-reconciliation.patch",
+        "0006-byte-exact-restore.patch",
+        "0007-native-safe-media-access.patch",
+        "0008-read-retained-original.patch",
+        "0009-decoder-process-cleanup.patch"
+      ],
+      "pluginVersion": "0.1.0"
+    },
+    {
+      "name": "fixtures uploaded",
+      "count": 11,
+      "bytes": [
+        1562530,
+        1599380,
+        1597758,
+        1548798,
+        1594761,
+        1598123,
+        1544459,
+        1588218,
+        1589662,
+        1582613,
+        1585782
+      ]
+    },
+    {
+      "name": "unlisted profile stays read-only",
+      "reportedProfile": {
+        "runtime": "node",
+        "database": "sqlite",
+        "storage": "local",
+        "locks": "in-process"
+      },
+      "applyOutcome": "unavailable",
+      "bulkStart": "UNAVAILABLE"
+    },
+    {
+      "name": "measured scan",
+      "totals": {
+        "scanned": 11,
+        "flagged": 11,
+        "ok": 0,
+        "skipped": {
+          "not-an-image": 0,
+          "unsupported-format": 0,
+          "missing-size": 0,
+          "missing-dimensions": 0,
+          "invalid-metadata": 0
+        },
+        "estimatedSavingsBytes": 0,
+        "unestimated": 0,
+        "measured": 11,
+        "measuredSavingsBytes": 16116992,
+        "failed": 0
+      },
+      "measuredFlagged": 11
+    },
+    {
+      "name": "sample changes nothing",
+      "mediaId": "01M4031V148X50V4PJ8PFFY7KR"
+    },
+    {
+      "name": "apply serves the new bytes at the same URL",
+      "mediaId": "01M4031V148X50V4PJ8PFFY7KR",
+      "url": "/_emdash/api/media/file/01M4031TWAWFMD9AA13C5HBNBA.jpg",
+      "originalSha256": "caa44671dd5b1a5d363bc6a9dd08eafd9b15314f3c7bb3f6c4fa796e2e2e34b6",
+      "servedSha256": "4d9ef7621a7901c118fd82600d2df1948f75f92781fdd3cde5f3cb4c49033830",
+      "inputBytes": 1562530,
+      "outputBytes": 116677,
+      "fromRevision": "01M4033KF7YHY1GDM33K65DRSW",
+      "toRevision": "01M4033KP9WZ0HVATNJE6ZZAEC",
+      "editorialKept": [
+        "id",
+        "storage_key",
+        "alt",
+        "caption",
+        "focal_x",
+        "focal_y",
+        "width",
+        "height",
+        "filename"
+      ]
+    },
+    {
+      "name": "original not publicly reachable",
+      "privateStoreHoldsOriginal": true,
+      "uploadsDirectoryHoldsOriginal": [
+        "<stable key>"
+      ],
+      "probes": [
+        {
+          "path": "/_emdash/api/media/file/<original key>",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/media-originals%2Fcaa44671dd5b1a5d363bc6a9dd08eafd9b15314f3c7bb3f6c4fa796e2e2e34b6",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/..%2Fprivate%2Fmedia-originals%2Fcaa44671dd5b1a5d363bc6a9dd08eafd9b15314f3c7bb3f6c4fa796e2e2e34b6",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/../private/<original key>",
+          "status": 401
+        },
+        {
+          "path": "/_emdash/api/media/file/01M4031TWAWFMD9AA13C5HBNBA.jpg",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/file/01M4031TWAWFMD9AA13C5HBNBA.jpg?rev=01M4033KF7YHY1GDM33K65DRSW",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/file/01M4031TWAWFMD9AA13C5HBNBA.jpg?revision=01M4033KF7YHY1GDM33K65DRSW",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/<media>",
+          "status": 401
+        },
+        {
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-originals%2Fcaa44671dd5b1a5d363bc6a9dd08eafd9b15314f3c7bb3f6c4fa796e2e2e34b6&w=320&f=png",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/01M4031TWAWFMD9AA13C5HBNBA.jpg",
+          "status": 200
+        },
+        {
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2F01M4031TWAWFMD9AA13C5HBNBA.jpg&w=320&f=png",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/file/media-revisions/4d9ef7621a7901c118fd82600d2df1948f75f92781fdd3cde5f3cb4c49033830.jpg",
+          "status": 404
+        },
+        {
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-revisions%2F4d9ef7621a7901c118fd82600d2df1948f75f92781fdd3cde5f3cb4c49033830.jpg&w=320&f=png",
+          "status": 404
+        }
+      ]
+    },
+    {
+      "name": "restore is byte-exact",
+      "mediaId": "01M4031V148X50V4PJ8PFFY7KR",
+      "servedSha256": "caa44671dd5b1a5d363bc6a9dd08eafd9b15314f3c7bb3f6c4fa796e2e2e34b6",
+      "revision": "01M4033KVSX327ECAJRKB6PEQ3"
+    },
+    {
+      "name": "preset change re-optimizes from the original",
+      "mediaId": "01M4031V148X50V4PJ8PFFY7KR",
+      "preset": "high-fidelity",
+      "inputBytes": 1562530,
+      "outputBytes": 513727,
+      "fencedOn": "01M4033M50TC6XNN37939JDGQP",
+      "newRevision": "01M4033MM52KY180J0PV4Y0NCD",
+      "hostOperationsSince": [
+        "replace"
+      ]
+    },
+    {
+      "name": "bulk apply",
+      "runId": "2026-10-03T05:17:07.716Z-2dc39afb",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 3,
+        "restored": 0,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      },
+      "grossReductionBytes": 4401183
+    },
+    {
+      "name": "batch restore is byte-exact",
+      "runId": "2026-10-03T05:18:02.849Z-fdfe49bf",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 0,
+        "restored": 3,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "unauthorized and CSRF-invalid requests are refused and change nothing",
+      "requests": 40,
+      "matrix": [
+        {
+          "call": "sample",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "sample",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "sample",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "sample",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "sample",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "apply",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "apply",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "apply",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "apply",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "apply",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "restore",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "restore",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "restore",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "restore",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "restore",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "scan-start",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "scan-start",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        }
+      ]
+    },
+    {
+      "name": "upgrade keeps data and a paused run stays paused",
+      "from": "0.1.0",
+      "to": "0.1.1-qualification",
+      "pluginRows": [
+        {
+          "collection": "items",
+          "count": 6
+        },
+        {
+          "collection": "results",
+          "count": 11
+        },
+        {
+          "collection": "runs",
+          "count": 3
+        }
+      ],
+      "results": 11,
+      "runId": "2026-10-03T05:19:05.696Z-a3c457f1",
+      "itemsWhilePaused": [
+        "queued",
+        "queued",
+        "queued"
+      ]
+    },
+    {
+      "name": "the paused run resumes after the upgrade",
+      "runId": "2026-10-03T05:19:05.696Z-a3c457f1",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 3,
+        "restored": 0,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "disable stops work and images keep serving",
+      "pluginRouteWhileDisabled": 404,
+      "cron": [
+        {
+          "task_name": "bulk-step",
+          "enabled": 0
+        }
+      ]
+    },
+    {
+      "name": "re-enable continues the run",
+      "runId": "2026-10-03T05:21:05.703Z-a9049486",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 0,
+        "restored": 3,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "sandboxed edition stays read-only",
+      "applyRoute": 404,
+      "bulkStartRoute": 404
+    },
+    {
+      "name": "rollback: unregistered plugin, images serve, host recovery restores byte-exact",
+      "mediaId": "01M4031W2GTJ7MX6HD3GN4TGKN",
+      "optimizedSha256": "6f059a5ca9634bbd2d9bd13b90efacbb4fc4a86de6c3ca335e79ea003f70ce13",
+      "restoredSha256": "bb6c80d93186c0f5532c979e295574bade9a35c1f7ef53acc2dfe14643c5ba12",
+      "recoveryListed": 1,
+      "recoveryResult": true
+    },
+    {
+      "name": "reinstall keeps data continuity",
+      "pluginRows": [
+        {
+          "collection": "items",
+          "count": 12
+        },
+        {
+          "collection": "results",
+          "count": 11
+        },
+        {
+          "collection": "runs",
+          "count": 4
+        }
+      ],
+      "restoreAfterHostRecovery": "nothing-to-restore",
+      "laterRestore": "restored"
+    }
+  ],
+  "durationSeconds": 526
+}

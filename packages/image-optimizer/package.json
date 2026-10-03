@@ -36,7 +36,8 @@
     "test": "emdash-plugin validate && vitest run && vitest run --config vitest.host-rejection.config.ts",
     "bundle": "emdash-plugin bundle",
     "calibrate": "node --experimental-strip-types calibration/calibrate.mjs",
-    "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs"
+    "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs",
+    "qualify:site": "node qualification/qualify-site.mjs"
   },
   "peerDependencies": {
     "emdash": ">=1.1.0",
