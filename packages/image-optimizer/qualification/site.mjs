@@ -1,8 +1,8 @@
-// Packaging, building, starting and stopping the disposable qualification site.
+// Packaging, building, starting and stopping the disposable qualification site. Build steps (git,
+// pnpm, npm, tar, astro) can run elsewhere than the site, through a wrapper; see `useBuildWrapper`.
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -23,34 +23,54 @@ export function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], ...options });
 }
 
+let buildWrapper = null;
+
+/**
+ * Runs every later build step as `<wrapper> <directory> env <NAME=VALUE...> <command> <args...>`: the
+ * wrapper runs the command in that directory of a build environment that sees the same paths, such
+ * as a container with the work directory mounted at the same absolute path. Without a wrapper, build
+ * steps run in this process's environment.
+ */
+export function useBuildWrapper(wrapper) {
+  buildWrapper = wrapper;
+}
+
+/** A build step: run directly, or through the build wrapper with the given extra environment. */
+function build(command, args, { cwd, env = {} }) {
+  if (!buildWrapper) return run(command, args, { cwd, env: { ...process.env, ...env } });
+  const assignments = Object.entries(env).map(([name, value]) => `${name}=${value}`);
+  return run(buildWrapper, [cwd, 'env', ...assignments, command, ...args]);
+}
+
 /**
  * Builds the patched `emdash` package of the pilot worktree and packs it. Returns the tarball path and
  * what identifies the build: the pinned commit and the git tree of the patched sources.
  */
 export function packHost(pilot, packages) {
-  const commit = run('git', ['rev-parse', 'HEAD'], { cwd: pilot }).trim();
-  const tree = run('git', ['write-tree'], { cwd: pilot }).trim();
-  const unstaged = run('git', ['diff', '--name-only'], { cwd: pilot }).trim();
+  const commit = build('git', ['rev-parse', 'HEAD'], { cwd: pilot }).trim();
+  const tree = build('git', ['write-tree'], { cwd: pilot }).trim();
+  const unstaged = build('git', ['diff', '--name-only'], { cwd: pilot }).trim();
   if (unstaged) throw new Error(`The pilot worktree has changes that no patch records:\n${unstaged}`);
   const core = join(pilot, 'packages/core');
-  run('npx', ['-y', PNPM_HOST, 'build'], { cwd: core });
+  build('npx', ['-y', PNPM_HOST, 'build'], { cwd: core });
   const before = new Set(readdirSync(packages));
-  run('npx', ['-y', PNPM_HOST, 'pack', '--pack-destination', packages], { cwd: core });
+  build('npx', ['-y', PNPM_HOST, 'pack', '--pack-destination', packages], { cwd: core });
   const tarball = readdirSync(packages).find((name) => name.startsWith('emdash-') && !before.has(name)) ?? 'emdash-1.1.0.tgz';
   return { tarball: join(packages, tarball), commit, tree };
 }
 
 /** Builds the plugin package and packs it, once as built and once with its version bumped for the upgrade. */
 export async function packPlugin(pluginDirectory, packages, upgradeVersion) {
-  run('npx', ['-y', PNPM_REPO, 'build'], { cwd: pluginDirectory });
+  build('npx', ['-y', PNPM_REPO, 'build'], { cwd: pluginDirectory });
   const manifest = JSON.parse(readFileSync(join(pluginDirectory, 'package.json'), 'utf8'));
-  run('npm', ['pack', '--pack-destination', packages], { cwd: pluginDirectory });
+  build('npm', ['pack', '--pack-destination', packages], { cwd: pluginDirectory });
   const current = join(packages, `${manifest.name}-${manifest.version}.tgz`);
 
-  // The upgrade: the same build under a new version in every place the version is recorded.
-  const scratch = await mkdtemp(join(tmpdir(), 'image-optimizer-upgrade-'));
+  // The upgrade: the same build under a new version in every place the version is recorded. The
+  // scratch directory is in the work directory, which a build wrapper sees at the same path.
+  const scratch = await mkdtemp(join(packages, '.upgrade-'));
   try {
-    run('tar', ['xzf', current, '-C', scratch]);
+    build('tar', ['xzf', current, '-C', scratch], { cwd: packages });
     const replace = async (file, from, to) => {
       const path = join(scratch, 'package', file);
       const text = await readFile(path, 'utf8');
@@ -62,7 +82,7 @@ export async function packPlugin(pluginDirectory, packages, upgradeVersion) {
     await replace('dist/index.mjs', `"version": "${manifest.version}"`, `"version": "${upgradeVersion}"`);
     await replace('dist/manifest.json', `"version": "${manifest.version}"`, `"version": "${upgradeVersion}"`);
     const upgraded = join(packages, `${manifest.name}-${upgradeVersion}.tgz`);
-    run('tar', ['czf', upgraded, '-C', scratch, 'package']);
+    build('tar', ['czf', upgraded, '-C', scratch, 'package'], { cwd: packages });
     return { name: manifest.name, version: manifest.version, current, upgradeVersion, upgraded };
   } finally {
     await rm(scratch, { recursive: true, force: true });
@@ -80,12 +100,12 @@ export async function createSite({ template, siteDirectory, hostTarball, pluginT
     dependencies: { ...SITE_DEPENDENCIES, emdash: `file:${hostTarball}`, 'image-optimizer': `file:${pluginTarball}` },
   };
   await writeFile(join(siteDirectory, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: siteDirectory });
+  build('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: siteDirectory });
 }
 
 /** Replaces the installed plugin with another tarball (the upgrade). */
 export function installPlugin(siteDirectory, pluginTarball) {
-  run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', `image-optimizer@file:${pluginTarball}`], { cwd: siteDirectory });
+  build('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', `image-optimizer@file:${pluginTarball}`], { cwd: siteDirectory });
 }
 
 export function installedPluginVersion(siteDirectory) {
@@ -96,7 +116,7 @@ export function installedPluginVersion(siteDirectory) {
 export async function buildSite(siteDirectory, config) {
   await writeFile(join(siteDirectory, 'qualify.json'), `${JSON.stringify(config, null, 2)}\n`);
   await rm(join(siteDirectory, 'dist'), { recursive: true, force: true });
-  run(join(siteDirectory, 'node_modules/.bin/astro'), ['build'], { cwd: siteDirectory, env: { ...process.env, ASTRO_TELEMETRY_DISABLED: '1' } });
+  build(join(siteDirectory, 'node_modules/.bin/astro'), ['build'], { cwd: siteDirectory, env: { ASTRO_TELEMETRY_DISABLED: '1' } });
 }
 
 /** Starts the built site on 127.0.0.1 and waits until it answers. */
