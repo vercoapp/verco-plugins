@@ -127,9 +127,9 @@ are unavailable, and the routes answer `unavailable` and change nothing.
   interleave replacements. The host reports `locks: 'in-process'` from each of them.
 - **Media served only through the site.** With host patches up to 0009, originals stay in the uploads
   directory at their public keys, and anything serving that directory directly serves them. Host
-  patch 0010 moves them out (see
+  patch 0010, which the recorded runs use, moves them out (see
   [What the uploads directory holds](#what-the-uploads-directory-holds)), within limits; serving
-  through the site remains the setup that was run.
+  through the site remains the recommended setup.
 
 Both are part of the
 [hosted profile](#hosted-profile-node-on-the-host-one-systemd-service-per-site-native-edition-pilot)
@@ -269,7 +269,7 @@ restore and bulk runs are **on by default** here; the run registers the plugin w
 `qualifiedProfiles` option for everything after its first check. The list rests on these runs and the
 tests named above, nothing more: one VPS, generated images, no real site.
 
-**The profile as run.** The pinned EmDash commit with host patches 0001 to 0009 (the git tree of 0009
+**The profile as run.** The pinned EmDash commit with host patches 0001 to 0010 (the git tree of 0010
 is checked), the `emdash` package built from it and every other EmDash package at the pinned
 published version, Astro 7.3.2 with `@astrojs/node` 11.1.5 (standalone), SQLite through `node:sqlite`,
 local storage, `safeMedia` with a private directory outside the uploads and public directories, Astro
@@ -303,7 +303,7 @@ software passkeys made for the run.
   alt text, caption and focal point are kept, and the host's operation is fenced on the baseline
   revision; the original is in the private store and none of 13 URL probes (its key, encoded and
   traversal paths, revision keys, query parameters, the transformed endpoint) serves it, nor does
-  any of 58 requests for its two stored copies (in the uploads directory and in the private store)
+  any of 58 requests for its private copy and for the storage key that held it before the apply,
   at their file paths under likely static prefixes (`/uploads/...`, `/data/...`, `/media/...`,
   `/private/...` and others), at their absolute paths and through traversal, all answered 404; restore
   serves the original byte for byte; a preset change re-optimizes from the privately read original
@@ -338,7 +338,7 @@ And, for this profile:
   (23.9 MP JPEG of 10.4 MiB, 12 MP lossy WebP, 12 MP lossless WebP of 14.8 MiB), with a sample of the
   largest started beside it, ran with the shipped [processor limits](#processor-limits). All three
   were measured. The sample was refused as busy: the pixel budget did not admit it beside the
-  scan's 24 MP encode, so two encodes never ran at once in this run. The unit peaked at 701 MiB of its
+  scan's 24 MP encode, so two encodes never ran at once in this run. The unit peaked at 690 MiB of its
   3 GiB, and `memory.events` showed no `oom` or `oom_kill`. The same was read from every unit just
   before it stopped: none of the eight reached its limit.
 - **Site data belongs to the site user alone.** After the uploads, after the first apply and at the
@@ -363,23 +363,23 @@ The new checks were confirmed by breaking each one on purpose, and each run then
 
 **Delivery freshness.** After each apply, restore and re-optimization, the first request to the
 image's URL (`/_emdash/api/media/file/<key>`) and to its transformed URL (`/_image?href=...&w=320&f=png`)
-already served the new content: no stale response, the direct URL within 6 ms and the transformed
-one within 26 ms of the route answering (the transform included); through the proxy, within 17 ms
-and 30 ms. Both answer `Cache-Control: public, max-age=0, must-revalidate` without an ETag, with and
+already served the new content: no stale response, the direct URL within 8 ms and the transformed
+one within 25 ms of the route answering (the transform included); through the proxy, within 18 ms
+and 27 ms. Both answer `Cache-Control: public, max-age=0, must-revalidate` without an ETag, with and
 without the proxy. That bounds the site and a proxy that does not cache: a CDN or caching proxy in
 front that ignores these headers, and pages prerendered at build time, keep the old image until they
 are purged or rebuilt, which these runs do not cover.
 
 #### What the uploads directory holds
 
-**In the recorded runs (host patches 0001 to 0009), the original stays in the uploads directory.**
-When that host first replaces an image, it records the uploaded file, at its storage key, as the
-image's baseline revision and keeps it there; it also copies it to the private store. The file route
-resolves the key to the active revision, so the original is not served through EmDash, but anything
-that serves the uploads directory directly (a web server or proxy mounting it, a public bucket)
-serves originals.
+**With host patches up to 0009, the original stays in the uploads directory.** When that host first
+replaces an image, it records the uploaded file, at its storage key, as the image's baseline revision
+and keeps it there; it also copies it to the private store. The file route resolves the key to the
+active revision, so the original is not served through EmDash, but anything that serves the uploads
+directory directly (a web server or proxy mounting it, a public bucket) serves originals. The
+migration check below saw exactly that on a 0009 host.
 
-**Host patch 0010 changes that.** After each publication the host rewrites the file at the storage
+**Host patch 0010, which the recorded runs use, changes that.** After each publication the host rewrites the file at the storage
 key with the active image and removes the superseded revision object, each only once the bytes they
 displace are verified in the private store. The uploads directory then holds, per replaced image,
 its storage key and one revision object, both the active image; originals exist only in the private
@@ -424,9 +424,32 @@ the run first optimizes an image on the 0009 host, where the storage key keeps t
 switches the site to the 0010 host and waits for its reconciliation to rewrite the key, within 12
 minutes of the start.
 
-The scan's rules were each removed once and its tests failed. **These checks have not been run on
-the hosted profile yet: the numbers above and the evidence files are from host patches 0001 to 0009,
-and the results for 0010 (files scanned, cleanup wait, static mount, migration time) are pending.**
+**What the recorded runs found** (both on the systemd profile, one of them through the proxy):
+
+- Ten scans in each run, of up to 25 files, found nothing out of line. No cleanup was ever owed when
+  the scan ran: the wait was 0 ms each time, against the 5 seconds allowed.
+- After the first apply the storage key held the published candidate and no file in the directory
+  was the original; the same after the re-optimization and the bulk apply. After each restore the
+  storage key held the original again, now as the active revision.
+- With the site stopped, the host's reconciliation reported no cleanup owed after the host recovery
+  and at the end.
+- Deleting two images removed their storage keys. The one deleted while optimized left its last
+  revision object, which was never an original. The one deleted after a restore left an object
+  holding its retained original; reconciliation with the site stopped removed it. While the site
+  runs, the host removes such an object on a maintenance tick after the grace period, which the run
+  does not wait for.
+- **Static mount:** 218 requests through the file server on the uploads directory, for every file
+  after each change, were each answered with the file on disk; none was a retained original that was
+  not active. The file server ran as the site user. The same server as another user got 403.
+- **Migration:** an image optimized on the 0009 host kept its original at the storage key, and the
+  site still served the optimized image. Started on that data, the 0010 host reported one cleanup
+  owed and rewrote the key 601 seconds later (611 seconds after the publication), within the 12
+  minutes allowed; the original was then nowhere in the directory, and restore returned it byte for
+  byte. Until then, a direct mount would have served the original.
+
+The scan's rules were each removed once and its tests failed. Not covered: an interrupted cleanup
+(a site stopped between the commit and the rewrite), more than one image in a migration, a cache in
+front of the directory, and any storage but the local file system.
 
 Serve media only through the site in any case: it is the setup the runs cover, it does not depend on
 the cleanup having finished, and on this profile the data directory's mode 0700 keeps a proxy
@@ -447,7 +470,7 @@ passed through it, with the same results: the 13 URL probes and the 58 static-pa
 returned the original, the 48 unauthorized requests were refused with the same statuses (the
 cross-origin ones included, so the forwarded headers the proxy adds do not weaken the origin check,
 and the ones a client forges do not pass it), passkey sign-in and the admin's own requests worked
-with the proxy's origin, and no unit was killed for memory (peak 696 MiB).
+with the proxy's origin, and no unit was killed for memory (peak 701 MiB).
 
 The run checks besides that the proxy's adapted configuration listens on loopback only, has no
 handler but a reverse proxy to the site, no file server, no file-system root and no admin endpoint;
@@ -473,7 +496,8 @@ example in a container, as `<executable> <directory> env <NAME=VALUE...> <comman
 environment must see the work directory at the same real path, since Astro records it in the build
 (a symlink does not do). `--memory-max` and `--cpu-quota` change the caps. `--proxy caddy
 --proxy-image caddy:2` gives the proxied run, which writes
-`qualification/site-host-proxy-latest.json`. It takes about ten minutes,
+`qualification/site-host-proxy-latest.json`. It takes about ten minutes (about twenty-one with
+`--migrate-from`),
 leaves the site stopped and its unit gone, and writes `qualification/site-host-latest.json` only when
 every check passed and the checkout has no uncommitted change; the evidence names the commit.
 

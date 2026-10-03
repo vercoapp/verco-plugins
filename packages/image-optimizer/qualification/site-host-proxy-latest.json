@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-03T17:53:37.043Z",
+  "timestamp": "2026-10-03T22:43:39.413Z",
   "node": "v22.16.0",
   "hardware": {
     "cpuModel": "AMD EPYC 9J45 128-Core Processor",
@@ -8,7 +8,7 @@
     "platform": "linux x64"
   },
   "source": {
-    "commit": "fe1c4a820c99d9ae2eb7f0dfb258db37047555cc",
+    "commit": "d17f72f5a6e9cf8a18daf800931b645317087d61",
     "uncommittedChanges": 0
   },
   "profile": {
@@ -28,6 +28,168 @@
     ],
     "fileSystemRoots": 0,
     "adminEndpoint": "off"
+  },
+  "publicStorage": {
+    "cleanupBoundMs": 5000,
+    "reconciliationBoundMs": 720000,
+    "staticMount": {
+      "server": "caddy",
+      "version": "v2.11.6",
+      "listens": "loopback only",
+      "readsTheDirectoryAs": "the site user"
+    },
+    "checks": [
+      {
+        "after": "upload",
+        "filesScanned": 11,
+        "managedMedia": 0,
+        "revisionObjects": 0,
+        "retainedOriginals": 0,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 11,
+          "servedActiveRevisions": 0,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "first apply",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 1,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 16,
+          "servedActiveRevisions": 1,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "restore",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 2,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 16,
+          "servedActiveRevisions": 1,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "second apply",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 2,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 16,
+          "servedActiveRevisions": 1,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "re-optimize",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 2,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 16,
+          "servedActiveRevisions": 1,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "bulk apply",
+        "filesScanned": 18,
+        "managedMedia": 4,
+        "revisionObjects": 4,
+        "retainedOriginals": 6,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 22,
+          "servedActiveRevisions": 4,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "batch restore",
+        "filesScanned": 18,
+        "managedMedia": 4,
+        "revisionObjects": 4,
+        "retainedOriginals": 9,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 22,
+          "servedActiveRevisions": 4,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "host recovery with the site stopped",
+        "filesScanned": 23,
+        "managedMedia": 9,
+        "revisionObjects": 9,
+        "retainedOriginals": 18,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 32,
+          "servedActiveRevisions": 9,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "before deleting",
+        "filesScanned": 25,
+        "managedMedia": 11,
+        "revisionObjects": 11,
+        "retainedOriginals": 22,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 36,
+          "servedActiveRevisions": 11,
+          "servedRetainedOriginals": 0
+        }
+      },
+      {
+        "after": "delete, then reconciliation with the site stopped",
+        "filesScanned": 22,
+        "managedMedia": 9,
+        "revisionObjects": 10,
+        "retainedOriginals": 22,
+        "leftoversOfDeletedMedia": 1,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0,
+        "staticMount": {
+          "requests": 31,
+          "servedActiveRevisions": 9,
+          "servedRetainedOriginals": 0
+        }
+      }
+    ]
   },
   "runtime": {
     "runner": "systemd transient service under its own system user, one process per site",
@@ -76,7 +238,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 231145472
+        "peakBytes": 210817024
       },
       {
         "events": {
@@ -87,7 +249,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 729681920
+        "peakBytes": 144261120
       },
       {
         "events": {
@@ -98,7 +260,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 150937600
+        "peakBytes": 279420928
       },
       {
         "events": {
@@ -109,7 +271,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 122249216
+        "peakBytes": 735199232
       },
       {
         "events": {
@@ -120,7 +282,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 178765824
+        "peakBytes": 152342528
       },
       {
         "events": {
@@ -131,7 +293,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 133074944
+        "peakBytes": 122900480
       },
       {
         "events": {
@@ -142,7 +304,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 113680384
+        "peakBytes": 158806016
       },
       {
         "events": {
@@ -153,13 +315,35 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 173903872
+        "peakBytes": 129150976
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 126017536
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 209375232
       }
     ]
   },
   "host": {
     "emdashCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
-    "emdashTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+    "emdashTree": "90f5be2d7b18659a7a79998f69d694600cbe20e5",
     "patches": [
       "0001-media-revisions-private-originals.patch",
       "0002-bounded-output-validation.patch",
@@ -169,7 +353,8 @@
       "0006-byte-exact-restore.patch",
       "0007-native-safe-media-access.patch",
       "0008-read-retained-original.patch",
-      "0009-decoder-process-cleanup.patch"
+      "0009-decoder-process-cleanup.patch",
+      "0010-public-active-revision.patch"
     ]
   },
   "plugin": {
@@ -198,19 +383,19 @@
         "event": "apply",
         "direct": {
           "staleResponses": 0,
-          "msToFresh": 5,
+          "msToFresh": 4.6,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973",
+          "sha256": "6e1b3594f56dccbf2b2ea5e6bf8c30406e71c39e17388e39a0758b5bfdf70049",
           "via": "1.1 Caddy",
           "age": null
         },
         "transformed": {
           "staleResponses": 0,
-          "msToFresh": 13.7,
+          "msToFresh": 27,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "eef359c2d678e07c67214727a5b72824c4f1ed3d5ed0a4f459ddc9c463ea1b37",
+          "sha256": "a30749a7dc434fe311873dd06373f79ff640b9c4ffe9905a336a0126315966e0",
           "via": "1.1 Caddy",
           "age": null
         }
@@ -219,19 +404,19 @@
         "event": "restore",
         "direct": {
           "staleResponses": 0,
-          "msToFresh": 16.4,
+          "msToFresh": 6.8,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
+          "sha256": "97510a0a9097a0a3e763dc40df653acfe12964818e6ccc06dfe6a9800e45433e",
           "via": "1.1 Caddy",
           "age": null
         },
         "transformed": {
           "staleResponses": 0,
-          "msToFresh": 29.2,
+          "msToFresh": 18.2,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "e99da844552f90aa75ef5d94efcacefc3197ae586250558452414e1fe91ed3ed",
+          "sha256": "07c3090519be9fa0775d0173e75f1a33ed747eed5c2924e28644d7d957dbb0cf",
           "via": "1.1 Caddy",
           "age": null
         }
@@ -240,19 +425,19 @@
         "event": "re-optimize",
         "direct": {
           "staleResponses": 0,
-          "msToFresh": 4.5,
+          "msToFresh": 17.4,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "e77186b2fe474103b1a9e22c45647b47f82bdc2e8209ca6dd9c1e26d80bad48f",
+          "sha256": "d298b16c2763c5ba1827cab50a712b958d57ee6db5cb5ae572879b22bd2df479",
           "via": "1.1 Caddy",
           "age": null
         },
         "transformed": {
           "staleResponses": 0,
-          "msToFresh": 25.1,
+          "msToFresh": 25.6,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "182c594cbc73d260550ddb3f5ae055a9c20d32f1b35b04f236f9f2332c6de008",
+          "sha256": "59137b89fafaba54afb24fe930ce2623e154fb5039d4f82f81f5cab6706a1410",
           "via": "1.1 Caddy",
           "age": null
         }
@@ -260,14 +445,14 @@
     ],
     "direct": {
       "maxStaleResponses": 0,
-      "maxMsToFresh": 16.4,
+      "maxMsToFresh": 17.4,
       "cacheControl": [
         "public, max-age=0, must-revalidate"
       ]
     },
     "transformed": {
       "maxStaleResponses": 0,
-      "maxMsToFresh": 29.2,
+      "maxMsToFresh": 27,
       "cacheControl": [
         "public, max-age=0, must-revalidate"
       ]
@@ -277,7 +462,7 @@
     {
       "name": "site packages built",
       "emdashCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
-      "emdashTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+      "emdashTree": "90f5be2d7b18659a7a79998f69d694600cbe20e5",
       "patches": [
         "0001-media-revisions-private-originals.patch",
         "0002-bounded-output-validation.patch",
@@ -287,7 +472,8 @@
         "0006-byte-exact-restore.patch",
         "0007-native-safe-media-access.patch",
         "0008-read-retained-original.patch",
-        "0009-decoder-process-cleanup.patch"
+        "0009-decoder-process-cleanup.patch",
+        "0010-public-active-revision.patch"
       ],
       "pluginVersion": "0.1.0"
     },
@@ -312,21 +498,65 @@
       "withoutTheSite": 502
     },
     {
+      "name": "an image optimized on the previous patch level is cleaned by the host under test",
+      "previousTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+      "stableKeyHeldOriginalBefore": true,
+      "cleanupsOwedAtStart": 1,
+      "secondsFromPublicationToCleanStableKey": 611,
+      "secondsFromStartOfTheHostUnderTest": 601,
+      "boundSecondsFromStart": 720,
+      "publicStorage": {
+        "after": "migration from the previous patch level",
+        "filesScanned": 2,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 1,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      "restoreAfterwards": "restored"
+    },
+    {
       "name": "fixtures uploaded",
       "count": 11,
       "bytes": [
-        1562742,
-        1599338,
-        1598055,
-        1548718,
-        1594559,
-        1597550,
-        1544670,
-        1588282,
-        1590092,
-        1582942,
-        1585978
+        1563314,
+        1599527,
+        1597660,
+        1548522,
+        1594307,
+        1597487,
+        1544341,
+        1588770,
+        1590027,
+        1582574,
+        1585420
       ]
+    },
+    {
+      "name": "public storage before any change: the host records cleanups, every upload at its key",
+      "after": "upload",
+      "filesScanned": 11,
+      "managedMedia": 0,
+      "revisionObjects": 0,
+      "retainedOriginals": 0,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 11,
+        "servedActiveRevisions": 0,
+        "servedRetainedOriginals": 0
+      }
+    },
+    {
+      "name": "a file server on the uploads directory is in place for the direct-serving check",
+      "server": "caddy",
+      "version": "v2.11.6",
+      "listens": "loopback only",
+      "readsTheDirectoryAs": "the site user",
+      "sameServerAsAnotherUser": 403
     },
     {
       "name": "the unit runs the site under its caps",
@@ -427,7 +657,7 @@
         "estimatedSavingsBytes": 0,
         "unestimated": 0,
         "measured": 11,
-        "measuredSavingsBytes": 16118570,
+        "measuredSavingsBytes": 16117609,
         "failed": 0
       },
       "measuredFlagged": 11
@@ -443,7 +673,7 @@
         {
           "name": "near-limit-24mp.jpg",
           "megapixels": 23.9,
-          "bytes": 10950598,
+          "bytes": 10949476,
           "status": "flagged",
           "basis": "measured",
           "reason": null
@@ -451,7 +681,7 @@
         {
           "name": "near-limit-12mp.webp",
           "megapixels": 12,
-          "bytes": 5870648,
+          "bytes": 5855658,
           "status": "flagged",
           "basis": "measured",
           "reason": null
@@ -459,7 +689,7 @@
         {
           "name": "near-limit-12mp-lossless.webp",
           "megapixels": 12,
-          "bytes": 15523734,
+          "bytes": 15526074,
           "status": "ok",
           "basis": "measured",
           "reason": null
@@ -472,7 +702,7 @@
       "workersSeen": 15,
       "processesSeen": 16,
       "memoryMax": "3221225472",
-      "memoryPeakBytes": 729681920,
+      "memoryPeakBytes": 735199232,
       "memoryEvents": {
         "low": 0,
         "high": 0,
@@ -484,18 +714,36 @@
     },
     {
       "name": "sample changes nothing",
-      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ"
+      "mediaId": "01M41YFW57GAKWACZ3ZWXSAZZJ"
+    },
+    {
+      "name": "public storage in line after the first apply",
+      "after": "first apply",
+      "filesScanned": 15,
+      "managedMedia": 1,
+      "revisionObjects": 1,
+      "retainedOriginals": 1,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 16,
+        "servedActiveRevisions": 1,
+        "servedRetainedOriginals": 0
+      },
+      "stableKeyHoldsCandidate": true,
+      "originalCopiesInUploads": 0
     },
     {
       "name": "apply serves the new bytes at the same URL",
-      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ",
-      "url": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg",
-      "originalSha256": "722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
-      "servedSha256": "6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973",
-      "inputBytes": 1562742,
-      "outputBytes": 116447,
-      "fromRevision": "01M41E0Z2CGCYNTWBKY5B60PXH",
-      "toRevision": "01M41E0ZA1VJWDTYX7R8QZ023R",
+      "mediaId": "01M41YFW57GAKWACZ3ZWXSAZZJ",
+      "url": "/_emdash/api/media/file/01M41YFW14QFME2HJTM8JHBS9Y.jpg",
+      "originalSha256": "97510a0a9097a0a3e763dc40df653acfe12964818e6ccc06dfe6a9800e45433e",
+      "servedSha256": "6e1b3594f56dccbf2b2ea5e6bf8c30406e71c39e17388e39a0758b5bfdf70049",
+      "inputBytes": 1563314,
+      "outputBytes": 116766,
+      "fromRevision": "01M41YKZ8PY070EHGG3TDNHK4Q",
+      "toRevision": "01M41YKZG7K0H33FEH4HMNG35S",
       "editorialKept": [
         "id",
         "storage_key",
@@ -529,20 +777,18 @@
     {
       "name": "original not publicly reachable",
       "privateStoreHoldsOriginal": true,
-      "uploadsDirectoryHoldsOriginal": [
-        "<stable key>"
-      ],
+      "originalCopiesInUploads": 0,
       "probes": [
         {
           "path": "/_emdash/api/media/file/<original key>",
           "status": 404
         },
         {
-          "path": "/_emdash/api/media/file/media-originals%2F722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
+          "path": "/_emdash/api/media/file/media-originals%2F97510a0a9097a0a3e763dc40df653acfe12964818e6ccc06dfe6a9800e45433e",
           "status": 404
         },
         {
-          "path": "/_emdash/api/media/file/..%2Fprivate%2Fmedia-originals%2F722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
+          "path": "/_emdash/api/media/file/..%2Fprivate%2Fmedia-originals%2F97510a0a9097a0a3e763dc40df653acfe12964818e6ccc06dfe6a9800e45433e",
           "status": 404
         },
         {
@@ -550,15 +796,15 @@
           "status": 401
         },
         {
-          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg",
+          "path": "/_emdash/api/media/file/01M41YFW14QFME2HJTM8JHBS9Y.jpg",
           "status": 200
         },
         {
-          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg?rev=01M41E0Z2CGCYNTWBKY5B60PXH",
+          "path": "/_emdash/api/media/file/01M41YFW14QFME2HJTM8JHBS9Y.jpg?rev=01M41YKZ8PY070EHGG3TDNHK4Q",
           "status": 200
         },
         {
-          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg?revision=01M41E0Z2CGCYNTWBKY5B60PXH",
+          "path": "/_emdash/api/media/file/01M41YFW14QFME2HJTM8JHBS9Y.jpg?revision=01M41YKZ8PY070EHGG3TDNHK4Q",
           "status": 200
         },
         {
@@ -566,28 +812,29 @@
           "status": 401
         },
         {
-          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-originals%2F722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81&w=320&f=png",
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-originals%2F97510a0a9097a0a3e763dc40df653acfe12964818e6ccc06dfe6a9800e45433e&w=320&f=png",
           "status": 404
         },
         {
-          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg",
+          "path": "/_emdash/api/media/file/01M41YFW14QFME2HJTM8JHBS9Y.jpg",
           "status": 200
         },
         {
-          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2F01M41DX87HEKMWFSN79TT2P66N.jpg&w=320&f=png",
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2F01M41YFW14QFME2HJTM8JHBS9Y.jpg&w=320&f=png",
           "status": 200
         },
         {
-          "path": "/_emdash/api/media/file/media-revisions/6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973.jpg",
+          "path": "/_emdash/api/media/file/media-revisions/6e1b3594f56dccbf2b2ea5e6bf8c30406e71c39e17388e39a0758b5bfdf70049.jpg",
           "status": 404
         },
         {
-          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-revisions%2F6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973.jpg&w=320&f=png",
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-revisions%2F6e1b3594f56dccbf2b2ea5e6bf8c30406e71c39e17388e39a0758b5bfdf70049.jpg&w=320&f=png",
           "status": 404
         }
       ],
       "staticPathProbes": {
-        "storedCopies": 2,
+        "paths": 2,
+        "privateCopies": 1,
         "requests": 58,
         "statuses": {
           "404": 58
@@ -597,25 +844,59 @@
     },
     {
       "name": "restore is byte-exact",
-      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ",
-      "servedSha256": "722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
-      "revision": "01M41E0ZM4P53DRM8W5DD1CS2V"
+      "mediaId": "01M41YFW57GAKWACZ3ZWXSAZZJ",
+      "servedSha256": "97510a0a9097a0a3e763dc40df653acfe12964818e6ccc06dfe6a9800e45433e",
+      "revision": "01M41YM00TSVGVMVB7KC7J7GMF",
+      "restoredFrom": "the private store: no public copy of the original existed"
+    },
+    {
+      "name": "public storage in line after restore",
+      "after": "restore",
+      "filesScanned": 15,
+      "managedMedia": 1,
+      "revisionObjects": 1,
+      "retainedOriginals": 2,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 16,
+        "servedActiveRevisions": 1,
+        "servedRetainedOriginals": 0
+      }
     },
     {
       "name": "preset change re-optimizes from the original",
-      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ",
+      "mediaId": "01M41YFW57GAKWACZ3ZWXSAZZJ",
       "preset": "high-fidelity",
-      "inputBytes": 1562742,
-      "outputBytes": 513262,
-      "fencedOn": "01M41E0ZXJYN69S58V1THG1JES",
-      "newRevision": "01M41E10CKVRHPA4697W19RQPP",
+      "inputBytes": 1563314,
+      "outputBytes": 514068,
+      "fencedOn": "01M41YM0EXC2901X59SGTT0KZQ",
+      "newRevision": "01M41YM1451164P2972WDV1DQG",
       "hostOperationsSince": [
         "replace"
-      ]
+      ],
+      "originalReadFrom": "the private store: no public copy of the original existed"
+    },
+    {
+      "name": "public storage in line after re-optimization",
+      "after": "re-optimize",
+      "filesScanned": 15,
+      "managedMedia": 1,
+      "revisionObjects": 1,
+      "retainedOriginals": 2,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 16,
+        "servedActiveRevisions": 1,
+        "servedRetainedOriginals": 0
+      }
     },
     {
       "name": "bulk apply",
-      "runId": "2026-10-03T17:47:10.223Z-b6e674d4",
+      "runId": "2026-10-03T22:37:10.961Z-68bf6fc8",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -628,11 +909,27 @@
         "conflict": 0,
         "failed": 0
       },
-      "grossReductionBytes": 4401354
+      "grossReductionBytes": 4401346
+    },
+    {
+      "name": "public storage in line after bulk apply",
+      "after": "bulk apply",
+      "filesScanned": 18,
+      "managedMedia": 4,
+      "revisionObjects": 4,
+      "retainedOriginals": 6,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 22,
+        "servedActiveRevisions": 4,
+        "servedRetainedOriginals": 0
+      }
     },
     {
       "name": "batch restore is byte-exact",
-      "runId": "2026-10-03T17:48:05.334Z-0bb89589",
+      "runId": "2026-10-03T22:38:01.275Z-2f8678fa",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -644,6 +941,22 @@
         "skipped": 0,
         "conflict": 0,
         "failed": 0
+      }
+    },
+    {
+      "name": "public storage in line after batch restore",
+      "after": "batch restore",
+      "filesScanned": 18,
+      "managedMedia": 4,
+      "revisionObjects": 4,
+      "retainedOriginals": 9,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 22,
+        "servedActiveRevisions": 4,
+        "servedRetainedOriginals": 0
       }
     },
     {
@@ -959,7 +1272,7 @@
         }
       ],
       "results": 14,
-      "runId": "2026-10-03T17:49:05.086Z-71a6012c",
+      "runId": "2026-10-03T22:39:05.877Z-185bf381",
       "itemsWhilePaused": [
         "queued",
         "queued",
@@ -968,7 +1281,7 @@
     },
     {
       "name": "the paused run resumes after the upgrade",
-      "runId": "2026-10-03T17:49:05.086Z-71a6012c",
+      "runId": "2026-10-03T22:39:05.877Z-185bf381",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -994,7 +1307,7 @@
     },
     {
       "name": "re-enable continues the run",
-      "runId": "2026-10-03T17:51:01.619Z-5b28408f",
+      "runId": "2026-10-03T22:41:02.506Z-ab439a8d",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -1014,10 +1327,34 @@
       "bulkStartRoute": 404
     },
     {
+      "name": "public storage in line after host recovery, and reconciliation owes nothing",
+      "after": "host recovery with the site stopped",
+      "filesScanned": 23,
+      "managedMedia": 9,
+      "revisionObjects": 9,
+      "retainedOriginals": 18,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 32,
+        "servedActiveRevisions": 9,
+        "servedRetainedOriginals": 0
+      },
+      "reconciliation": {
+        "runs": 1,
+        "pendingPublicCleanups": 0,
+        "mirroredStableKeys": 0,
+        "removedSupersededObjects": 0,
+        "removedCandidateObjects": 0,
+        "interruptedOperations": 0
+      }
+    },
+    {
       "name": "rollback: unregistered plugin, images serve, host recovery restores byte-exact",
-      "mediaId": "01M41DX9FPG2Q1V7K5ACE6PFCG",
-      "optimizedSha256": "15f15d83d7a28861474b65c4329c973a48885f757c355af628725e2c4f138fd2",
-      "restoredSha256": "a8f522132d3f376ecd139ddce085608215878ad9f92295026cfe5e235d0081db",
+      "mediaId": "01M41YFX7AF604Z4X0TE4GPY10",
+      "optimizedSha256": "a2de5c6a7a01de7a9d551348c1493651df00e8ca612eaa2b6838ea16bda9695f",
+      "restoredSha256": "05a4dcaee274c663df6fda9bb5fb34884e5ed883087ed97987bb837856f450cf",
       "recoveryListed": 1,
       "recoveryResult": true
     },
@@ -1041,10 +1378,45 @@
       "laterRestore": "restored"
     },
     {
+      "name": "deleting optimized images leaves no original in public storage",
+      "deleted": 2,
+      "stableKeysRemoved": 2,
+      "problemsBeforeReconciliation": 2,
+      "reconciliation": {
+        "runs": 2,
+        "pendingPublicCleanups": 0,
+        "mirroredStableKeys": 0,
+        "removedSupersededObjects": 1,
+        "removedCandidateObjects": 0,
+        "interruptedOperations": 0
+      },
+      "after": "delete, then reconciliation with the site stopped",
+      "filesScanned": 22,
+      "managedMedia": 9,
+      "revisionObjects": 10,
+      "retainedOriginals": 22,
+      "leftoversOfDeletedMedia": 1,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "staticMount": {
+        "requests": 31,
+        "servedActiveRevisions": 9,
+        "servedRetainedOriginals": 0
+      }
+    },
+    {
+      "name": "public storage stayed in line through the run",
+      "checks": 10,
+      "maxFilesScanned": 25,
+      "maxCleanupWaitMs": 0,
+      "cleanupBoundMs": 5000,
+      "staticMountRequests": 218
+    },
+    {
       "name": "site data still belongs to the site user alone at the end",
-      "entries": 64,
-      "files": 57,
-      "privateFiles": 19,
+      "entries": 56,
+      "files": 49,
+      "privateFiles": 22,
       "modes": {
         "data": "700",
         "database": "600",
@@ -1060,10 +1432,10 @@
     },
     {
       "name": "no unit of the run reached its memory limit",
-      "unitsStarted": 8,
-      "maxPeakBytes": 729681920,
+      "unitsStarted": 10,
+      "maxPeakBytes": 735199232,
       "oomKills": 0
     }
   ],
-  "durationSeconds": 592
+  "durationSeconds": 1254
 }
