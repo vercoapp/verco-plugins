@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-03T17:43:38.340Z",
+  "timestamp": "2026-10-03T17:53:37.043Z",
   "node": "v22.16.0",
   "hardware": {
     "cpuModel": "AMD EPYC 9J45 128-Core Processor",
@@ -18,7 +18,17 @@
     "locks": "in-process",
     "status": "on the adapter qualified list: apply and restore allowed with no option set"
   },
-  "proxy": null,
+  "proxy": {
+    "name": "caddy",
+    "version": "v2.11.6",
+    "listens": "loopback only",
+    "handlers": [
+      "reverse_proxy",
+      "subroute"
+    ],
+    "fileSystemRoots": 0,
+    "adminEndpoint": "off"
+  },
   "runtime": {
     "runner": "systemd transient service under its own system user, one process per site",
     "caps": {
@@ -66,7 +76,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 279621632
+        "peakBytes": 231145472
       },
       {
         "events": {
@@ -77,7 +87,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 735457280
+        "peakBytes": 729681920
       },
       {
         "events": {
@@ -88,7 +98,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 139587584
+        "peakBytes": 150937600
       },
       {
         "events": {
@@ -99,7 +109,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 120250368
+        "peakBytes": 122249216
       },
       {
         "events": {
@@ -110,7 +120,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 165879808
+        "peakBytes": 178765824
       },
       {
         "events": {
@@ -121,7 +131,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 128204800
+        "peakBytes": 133074944
       },
       {
         "events": {
@@ -132,7 +142,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 115863552
+        "peakBytes": 113680384
       },
       {
         "events": {
@@ -143,7 +153,7 @@
           "oom_kill": 0,
           "oom_group_kill": 0
         },
-        "peakBytes": 160616448
+        "peakBytes": 173903872
       }
     ]
   },
@@ -188,64 +198,76 @@
         "event": "apply",
         "direct": {
           "staleResponses": 0,
-          "msToFresh": 3.4,
+          "msToFresh": 5,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "dbeab39e39a8662c2465f1b6b41a77c7bab28afaf534d836d188c17e01a2db29"
+          "sha256": "6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973",
+          "via": "1.1 Caddy",
+          "age": null
         },
         "transformed": {
           "staleResponses": 0,
-          "msToFresh": 13.2,
+          "msToFresh": 13.7,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "f55c40219df580f2a7ab016f0ec2884b3bf16c530ecd5b3df4f7b96f7544593c"
+          "sha256": "eef359c2d678e07c67214727a5b72824c4f1ed3d5ed0a4f459ddc9c463ea1b37",
+          "via": "1.1 Caddy",
+          "age": null
         }
       },
       {
         "event": "restore",
         "direct": {
           "staleResponses": 0,
-          "msToFresh": 6,
+          "msToFresh": 16.4,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "d90819b594f86ef71506b93bdfe3bbe93f9e4d8ebceceb93d0ff8c4ce5ef7502"
+          "sha256": "722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
+          "via": "1.1 Caddy",
+          "age": null
         },
         "transformed": {
           "staleResponses": 0,
-          "msToFresh": 23.6,
+          "msToFresh": 29.2,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "472b1bf4551b6120d231c8477d757234e311282e81e5ed7c51f9a26c5c5987a8"
+          "sha256": "e99da844552f90aa75ef5d94efcacefc3197ae586250558452414e1fe91ed3ed",
+          "via": "1.1 Caddy",
+          "age": null
         }
       },
       {
         "event": "re-optimize",
         "direct": {
           "staleResponses": 0,
-          "msToFresh": 5.1,
+          "msToFresh": 4.5,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "5749ba7cc5c6f40783b6e38173187f027515914d2947052900abb546d40bebeb"
+          "sha256": "e77186b2fe474103b1a9e22c45647b47f82bdc2e8209ca6dd9c1e26d80bad48f",
+          "via": "1.1 Caddy",
+          "age": null
         },
         "transformed": {
           "staleResponses": 0,
-          "msToFresh": 25.3,
+          "msToFresh": 25.1,
           "cacheControl": "public, max-age=0, must-revalidate",
           "etag": null,
-          "sha256": "7cabb11f6eec97994d2cb49922161f288c1099d8b796e81e056c4a1b08d81a07"
+          "sha256": "182c594cbc73d260550ddb3f5ae055a9c20d32f1b35b04f236f9f2332c6de008",
+          "via": "1.1 Caddy",
+          "age": null
         }
       }
     ],
     "direct": {
       "maxStaleResponses": 0,
-      "maxMsToFresh": 6,
+      "maxMsToFresh": 16.4,
       "cacheControl": [
         "public, max-age=0, must-revalidate"
       ]
     },
     "transformed": {
       "maxStaleResponses": 0,
-      "maxMsToFresh": 25.3,
+      "maxMsToFresh": 29.2,
       "cacheControl": [
         "public, max-age=0, must-revalidate"
       ]
@@ -276,20 +298,34 @@
       "glibc": "2.41"
     },
     {
+      "name": "the proxy only passes requests to the site",
+      "proxy": "caddy",
+      "version": "v2.11.6",
+      "listens": "loopback only",
+      "handlers": [
+        "reverse_proxy",
+        "subroute"
+      ],
+      "upstreams": 1,
+      "fileSystemRoots": 0,
+      "adminEndpoint": "off",
+      "withoutTheSite": 502
+    },
+    {
       "name": "fixtures uploaded",
       "count": 11,
       "bytes": [
-        1562513,
-        1599321,
-        1597222,
-        1548690,
-        1594668,
-        1597617,
-        1544775,
-        1588237,
-        1590110,
-        1582432,
-        1585348
+        1562742,
+        1599338,
+        1598055,
+        1548718,
+        1594559,
+        1597550,
+        1544670,
+        1588282,
+        1590092,
+        1582942,
+        1585978
       ]
     },
     {
@@ -391,7 +427,7 @@
         "estimatedSavingsBytes": 0,
         "unestimated": 0,
         "measured": 11,
-        "measuredSavingsBytes": 16117150,
+        "measuredSavingsBytes": 16118570,
         "failed": 0
       },
       "measuredFlagged": 11
@@ -407,7 +443,7 @@
         {
           "name": "near-limit-24mp.jpg",
           "megapixels": 23.9,
-          "bytes": 10951078,
+          "bytes": 10950598,
           "status": "flagged",
           "basis": "measured",
           "reason": null
@@ -415,7 +451,7 @@
         {
           "name": "near-limit-12mp.webp",
           "megapixels": 12,
-          "bytes": 5854126,
+          "bytes": 5870648,
           "status": "flagged",
           "basis": "measured",
           "reason": null
@@ -423,7 +459,7 @@
         {
           "name": "near-limit-12mp-lossless.webp",
           "megapixels": 12,
-          "bytes": 15523292,
+          "bytes": 15523734,
           "status": "ok",
           "basis": "measured",
           "reason": null
@@ -436,7 +472,7 @@
       "workersSeen": 15,
       "processesSeen": 16,
       "memoryMax": "3221225472",
-      "memoryPeakBytes": 735457280,
+      "memoryPeakBytes": 729681920,
       "memoryEvents": {
         "low": 0,
         "high": 0,
@@ -448,18 +484,18 @@
     },
     {
       "name": "sample changes nothing",
-      "mediaId": "01M41DB1P61KAKP58HYCBBZ3S9"
+      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ"
     },
     {
       "name": "apply serves the new bytes at the same URL",
-      "mediaId": "01M41DB1P61KAKP58HYCBBZ3S9",
-      "url": "/_emdash/api/media/file/01M41DB1J3DH8YZ2WHCPT26H7J.jpg",
-      "originalSha256": "d90819b594f86ef71506b93bdfe3bbe93f9e4d8ebceceb93d0ff8c4ce5ef7502",
-      "servedSha256": "dbeab39e39a8662c2465f1b6b41a77c7bab28afaf534d836d188c17e01a2db29",
-      "inputBytes": 1562513,
-      "outputBytes": 116339,
-      "fromRevision": "01M41DEN1ER47FQ0Y410NQQZZV",
-      "toRevision": "01M41DEN8968QV8PYW5XY0QHKY",
+      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ",
+      "url": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg",
+      "originalSha256": "722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
+      "servedSha256": "6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973",
+      "inputBytes": 1562742,
+      "outputBytes": 116447,
+      "fromRevision": "01M41E0Z2CGCYNTWBKY5B60PXH",
+      "toRevision": "01M41E0ZA1VJWDTYX7R8QZ023R",
       "editorialKept": [
         "id",
         "storage_key",
@@ -502,11 +538,11 @@
           "status": 404
         },
         {
-          "path": "/_emdash/api/media/file/media-originals%2Fd90819b594f86ef71506b93bdfe3bbe93f9e4d8ebceceb93d0ff8c4ce5ef7502",
+          "path": "/_emdash/api/media/file/media-originals%2F722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
           "status": 404
         },
         {
-          "path": "/_emdash/api/media/file/..%2Fprivate%2Fmedia-originals%2Fd90819b594f86ef71506b93bdfe3bbe93f9e4d8ebceceb93d0ff8c4ce5ef7502",
+          "path": "/_emdash/api/media/file/..%2Fprivate%2Fmedia-originals%2F722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
           "status": 404
         },
         {
@@ -514,15 +550,15 @@
           "status": 401
         },
         {
-          "path": "/_emdash/api/media/file/01M41DB1J3DH8YZ2WHCPT26H7J.jpg",
+          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg",
           "status": 200
         },
         {
-          "path": "/_emdash/api/media/file/01M41DB1J3DH8YZ2WHCPT26H7J.jpg?rev=01M41DEN1ER47FQ0Y410NQQZZV",
+          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg?rev=01M41E0Z2CGCYNTWBKY5B60PXH",
           "status": 200
         },
         {
-          "path": "/_emdash/api/media/file/01M41DB1J3DH8YZ2WHCPT26H7J.jpg?revision=01M41DEN1ER47FQ0Y410NQQZZV",
+          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg?revision=01M41E0Z2CGCYNTWBKY5B60PXH",
           "status": 200
         },
         {
@@ -530,23 +566,23 @@
           "status": 401
         },
         {
-          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-originals%2Fd90819b594f86ef71506b93bdfe3bbe93f9e4d8ebceceb93d0ff8c4ce5ef7502&w=320&f=png",
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-originals%2F722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81&w=320&f=png",
           "status": 404
         },
         {
-          "path": "/_emdash/api/media/file/01M41DB1J3DH8YZ2WHCPT26H7J.jpg",
+          "path": "/_emdash/api/media/file/01M41DX87HEKMWFSN79TT2P66N.jpg",
           "status": 200
         },
         {
-          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2F01M41DB1J3DH8YZ2WHCPT26H7J.jpg&w=320&f=png",
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2F01M41DX87HEKMWFSN79TT2P66N.jpg&w=320&f=png",
           "status": 200
         },
         {
-          "path": "/_emdash/api/media/file/media-revisions/dbeab39e39a8662c2465f1b6b41a77c7bab28afaf534d836d188c17e01a2db29.jpg",
+          "path": "/_emdash/api/media/file/media-revisions/6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973.jpg",
           "status": 404
         },
         {
-          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-revisions%2Fdbeab39e39a8662c2465f1b6b41a77c7bab28afaf534d836d188c17e01a2db29.jpg&w=320&f=png",
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-revisions%2F6a8844aae0b5ed76290e3d482e22f4b425d74f52a49e709aa88015a4fe635973.jpg&w=320&f=png",
           "status": 404
         }
       ],
@@ -561,25 +597,25 @@
     },
     {
       "name": "restore is byte-exact",
-      "mediaId": "01M41DB1P61KAKP58HYCBBZ3S9",
-      "servedSha256": "d90819b594f86ef71506b93bdfe3bbe93f9e4d8ebceceb93d0ff8c4ce5ef7502",
-      "revision": "01M41DENJDVEB2ZV8N673Z7ZXE"
+      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ",
+      "servedSha256": "722ac4c814e74c68fac4045a21c63d9318e07a9254306c28712a6517f8892b81",
+      "revision": "01M41E0ZM4P53DRM8W5DD1CS2V"
     },
     {
       "name": "preset change re-optimizes from the original",
-      "mediaId": "01M41DB1P61KAKP58HYCBBZ3S9",
+      "mediaId": "01M41DX8BSN37F5F6B4MHAKGJZ",
       "preset": "high-fidelity",
-      "inputBytes": 1562513,
-      "outputBytes": 513255,
-      "fencedOn": "01M41DENWJZK81M2G6NPPQBMD6",
-      "newRevision": "01M41DEPC1MFG7BBSK6JKTRX4P",
+      "inputBytes": 1562742,
+      "outputBytes": 513262,
+      "fencedOn": "01M41E0ZXJYN69S58V1THG1JES",
+      "newRevision": "01M41E10CKVRHPA4697W19RQPP",
       "hostOperationsSince": [
         "replace"
       ]
     },
     {
       "name": "bulk apply",
-      "runId": "2026-10-03T17:37:10.142Z-67bf517c",
+      "runId": "2026-10-03T17:47:10.223Z-b6e674d4",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -592,11 +628,11 @@
         "conflict": 0,
         "failed": 0
       },
-      "grossReductionBytes": 4400695
+      "grossReductionBytes": 4401354
     },
     {
       "name": "batch restore is byte-exact",
-      "runId": "2026-10-03T17:38:05.274Z-fc32c33a",
+      "runId": "2026-10-03T17:48:05.334Z-0bb89589",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -923,7 +959,7 @@
         }
       ],
       "results": 14,
-      "runId": "2026-10-03T17:39:05.292Z-cb7ad3ef",
+      "runId": "2026-10-03T17:49:05.086Z-71a6012c",
       "itemsWhilePaused": [
         "queued",
         "queued",
@@ -932,7 +968,7 @@
     },
     {
       "name": "the paused run resumes after the upgrade",
-      "runId": "2026-10-03T17:39:05.292Z-cb7ad3ef",
+      "runId": "2026-10-03T17:49:05.086Z-71a6012c",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -958,7 +994,7 @@
     },
     {
       "name": "re-enable continues the run",
-      "runId": "2026-10-03T17:41:02.444Z-7ba851e0",
+      "runId": "2026-10-03T17:51:01.619Z-5b28408f",
       "counts": {
         "queued": 0,
         "processing": 0,
@@ -979,9 +1015,9 @@
     },
     {
       "name": "rollback: unregistered plugin, images serve, host recovery restores byte-exact",
-      "mediaId": "01M41DB2RYYFWTJEYSKZVWJ4ZJ",
-      "optimizedSha256": "61d14b2fc41f942d65af26203d1403c8323ba6f35f0b50e0cd837ff8e703afd0",
-      "restoredSha256": "62acf0fbbb425acfc0ef80d57a4d71461f3f791f39107f868343db280ce2929b",
+      "mediaId": "01M41DX9FPG2Q1V7K5ACE6PFCG",
+      "optimizedSha256": "15f15d83d7a28861474b65c4329c973a48885f757c355af628725e2c4f138fd2",
+      "restoredSha256": "a8f522132d3f376ecd139ddce085608215878ad9f92295026cfe5e235d0081db",
       "recoveryListed": 1,
       "recoveryResult": true
     },
@@ -1025,9 +1061,9 @@
     {
       "name": "no unit of the run reached its memory limit",
       "unitsStarted": 8,
-      "maxPeakBytes": 735457280,
+      "maxPeakBytes": 729681920,
       "oomKills": 0
     }
   ],
-  "durationSeconds": 593
+  "durationSeconds": 592
 }

@@ -256,11 +256,14 @@ staging directories (owned by that user, mode 0700), memory and CPU caps on the 
 
 `qualification/qualify-site.mjs --runner systemd` builds a disposable EmDash site from the patched
 host and runs it this way, as a transient systemd service, then drives the native edition over HTTP
-the way the admin does. The last clean run is recorded in
-[`qualification/site-host-latest.json`](qualification/site-host-latest.json). What the host reports on
+the way the admin does. The last clean runs, both of one commit named in the evidence, are recorded in
+[`qualification/site-host-latest.json`](qualification/site-host-latest.json) (requests sent to the
+site's port) and
+[`qualification/site-host-proxy-latest.json`](qualification/site-host-proxy-latest.json) (the same
+run [through a reverse proxy](#through-a-reverse-proxy)). What the host reports on
 this profile is the one entry of `QUALIFIED_HOST_PROFILES` in `packages/media-host-adapter`, so apply,
 restore and bulk runs are **on by default** here; the run registers the plugin with no
-`qualifiedProfiles` option for everything after its first check. The list rests on this run and the
+`qualifiedProfiles` option for everything after its first check. The list rests on these runs and the
 tests named above, nothing more: one VPS, generated images, no real site.
 
 **The profile as run.** The pinned EmDash commit with host patches 0001 to 0009 (the git tree of 0009
@@ -296,15 +299,20 @@ software passkeys made for the run.
   file; apply of one image, after which its unchanged URL serves the new bytes, its ID, storage key,
   alt text, caption and focal point are kept, and the host's operation is fenced on the baseline
   revision; the original is in the private store and none of 13 URL probes (its key, encoded and
-  traversal paths, revision keys, query parameters, the transformed endpoint) serves it; restore
+  traversal paths, revision keys, query parameters, the transformed endpoint) serves it, nor does
+  any of 58 requests for its two stored copies (in the uploads directory and in the private store)
+  at their file paths under likely static prefixes (`/uploads/...`, `/data/...`, `/media/...`,
+  `/private/...` and others), at their absolute paths and through traversal, all answered 404; restore
   serves the original byte for byte; a preset change re-optimizes from the privately read original
   with a single fenced replace and no restore; a bulk apply of three images and a batch restore,
   byte-exact.
 - Authorization: the sample, apply, restore, bulk-start (apply and restore), bulk-retry,
   bulk-reconcile and scan-start routes, each without a session (401), as an editor without
   `plugins:manage` (403), as the admin without the `X-EmDash-Request` header (403), as the admin from
-  another origin without it (403) and with an invalid bearer token (401). Every one of the 40 requests
-  left the database rows and files unchanged.
+  another origin without it (403), the same with forged `X-Forwarded-Host`, `X-Forwarded-Proto` and
+  `Forwarded` headers naming that origin (403), and with an invalid bearer token (401). Every one of
+  the 48 requests left the database rows and files unchanged. The admin's own request naming the
+  run's origin is allowed.
 - Lifecycle: a run paused before an upgrade (the plugin rebuilt under another version) is still paused
   after it and through a scheduler interval, with its images untouched, and completes on resume;
   scan results, settings and run records are kept. Disabling the plugin stops an active run while
@@ -327,7 +335,7 @@ And, for this profile:
   (23.9 MP JPEG of 10.4 MiB, 12 MP lossy WebP, 12 MP lossless WebP of 14.8 MiB), with a sample of the
   largest started beside it, ran with the shipped [processor limits](#processor-limits). All three
   were measured. The sample was refused as busy: the pixel budget did not admit it beside the
-  scan's 24 MP encode, so two encodes never ran at once in this run. The unit peaked at 705 MiB of its
+  scan's 24 MP encode, so two encodes never ran at once in this run. The unit peaked at 701 MiB of its
   3 GiB, and `memory.events` showed no `oom` or `oom_kill`. The same was read from every unit just
   before it stopped: none of the eight reached its limit.
 - **Site data belongs to the site user alone.** After the uploads, after the first apply and at the
@@ -352,11 +360,12 @@ The new checks were confirmed by breaking each one on purpose, and each run then
 
 **Delivery freshness.** After each apply, restore and re-optimization, the first request to the
 image's URL (`/_emdash/api/media/file/<key>`) and to its transformed URL (`/_image?href=...&w=320&f=png`)
-already served the new content: no stale response, the direct URL within 11 ms and the transformed
-one within 25 ms of the route answering (the transform included). Both answer
-`Cache-Control: public, max-age=0, must-revalidate` without an ETag. That bounds the site itself only:
-a CDN or proxy in front that ignores these headers, and pages prerendered at build time, keep the old
-image until they are purged or rebuilt, which this run does not cover.
+already served the new content: no stale response, the direct URL within 6 ms and the transformed
+one within 26 ms of the route answering (the transform included); through the proxy, within 17 ms
+and 30 ms. Both answer `Cache-Control: public, max-age=0, must-revalidate` without an ETag, with and
+without the proxy. That bounds the site and a proxy that does not cache: a CDN or caching proxy in
+front that ignores these headers, and pages prerendered at build time, keep the old image until they
+are purged or rebuilt, which these runs do not cover.
 
 **The original stays in the uploads directory.** When the host first replaces an image, it records
 the uploaded file, at its storage key, as the image's baseline revision and keeps it there; it also
@@ -366,26 +375,30 @@ server or proxy mounting it, a public bucket) would serve originals. Serve media
 site; on this profile the data directory's mode 0700 also keeps a proxy running as another user from
 reading it.
 
-Not covered: a reverse proxy in front (the recorded run talks to the site's port directly; see
-below), a persistent unit with `Restart=` and boot ordering (the run uses transient units), several
-sites on one host, real users or content.
+Not covered: a caching proxy or CDN, TLS, a proxy other than the one below or on another machine, a
+persistent unit with `Restart=` and boot ordering (the runs use transient units), several sites on
+one host, real users or content.
 
-**Through a reverse proxy.** With `--proxy caddy` the script starts a throwaway
-[Caddy](https://caddyserver.com/) on 127.0.0.1 in front of the site (a `caddy` binary, or with
-`--proxy-image <image>` a container on the host's network, removed when it stops) and sends every
-request of the run to the proxy; the site's URL and the passkeys' origin are the proxy's. Besides
-the whole checklist it checks that the proxy's adapted configuration listens on loopback only, has
-no handler but a reverse proxy to the site, no file server, no file-system root and no admin
-endpoint; that the proxy answers 502, not content, while the site is down; and that every response
-measured for freshness carries the proxy's `Via` header. It writes
-`qualification/site-host-proxy-latest.json`. **No run through a proxy is recorded yet.**
+#### Through a reverse proxy
 
-In both forms the run requests the stored copies of an original (in the uploads directory and in the
-private store) at their file paths under likely static prefixes (`/uploads/...`, `/data/...`,
-`/media/...`, `/private/...` and others) and at their absolute paths, and fails if any answer is the
-original; and the authorization matrix includes a cross-origin request with forged
-`X-Forwarded-Host`, `X-Forwarded-Proto` and `Forwarded` headers. These two additions are in the
-script but not yet in the recorded evidence.
+With `--proxy caddy` the script starts a throwaway [Caddy](https://caddyserver.com/) on 127.0.0.1 in
+front of the site (a `caddy` binary, or with `--proxy-image <image>` a container on the host's
+network, removed when it stops) and sends every request of the run to the proxy; the site's URL and
+the passkeys' origin are the proxy's. The recorded run used Caddy 2.11.6 over plain HTTP on loopback,
+with a configuration whose only directive is `reverse_proxy` to the site. The whole checklist above
+passed through it, with the same results: the 13 URL probes and the 58 static-path requests never
+returned the original, the 48 unauthorized requests were refused with the same statuses (the
+cross-origin ones included, so the forwarded headers the proxy adds do not weaken the origin check,
+and the ones a client forges do not pass it), passkey sign-in and the admin's own requests worked
+with the proxy's origin, and no unit was killed for memory (peak 696 MiB).
+
+The run checks besides that the proxy's adapted configuration listens on loopback only, has no
+handler but a reverse proxy to the site, no file server, no file-system root and no admin endpoint;
+that the proxy answers 502, not content, while the site is down; and that every response measured
+for freshness carries the proxy's `Via` header. The configuration check was confirmed by breaking it
+(its tests fail without the handler or the root check), and the static-path requests by pointing
+them at a Caddy that serves an uploads directory, where `/uploads/<key>` returned the stored file.
+Those two were tried on a development machine, not in the recorded runs.
 
 To repeat the run, as root on the host, from a checkout carrying the host patches, with the site
 user created (`useradd --system --no-create-home --shell /usr/sbin/nologin <user>`):
@@ -401,7 +414,9 @@ node packages/image-optimizer/qualification/qualify-site.mjs \
 `--build-wrapper <executable>` runs the build steps (git, pnpm, npm, tar, astro) elsewhere, for
 example in a container, as `<executable> <directory> env <NAME=VALUE...> <command...>`. The build
 environment must see the work directory at the same real path, since Astro records it in the build
-(a symlink does not do). `--memory-max` and `--cpu-quota` change the caps. It takes about ten minutes,
+(a symlink does not do). `--memory-max` and `--cpu-quota` change the caps. `--proxy caddy
+--proxy-image caddy:2` gives the proxied run, which writes
+`qualification/site-host-proxy-latest.json`. It takes about ten minutes,
 leaves the site stopped and its unit gone, and writes `qualification/site-host-latest.json` only when
 every check passed and the checkout has no uncommitted change; the evidence names the commit.
 
@@ -501,8 +516,9 @@ before the upgrade each made the run fail.
    static mount: it holds the originals of optimized images at their public keys (see above). With
    nginx, a single `location / { proxy_pass http://127.0.0.1:4321; }` with the usual `Host` and
    forwarding headers; no `location` that points at the file system. A proxy cache must honour
-   `Cache-Control: max-age=0, must-revalidate`, or be purged after apply and restore. Not exercised
-   in the run.
+   `Cache-Control: max-age=0, must-revalidate`, or be purged after apply and restore. The run
+   [through a proxy](#through-a-reverse-proxy) used Caddy with `reverse_proxy` alone; nginx, caching
+   and TLS were not exercised.
 8. **One process per site.** The safe-media locks are held in the process, so two processes on the
    same data can interleave replacements and restores. Do not run the site under a cluster or process
    manager that forks several workers, do not start a second service (or a copy under another name)
