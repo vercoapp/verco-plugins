@@ -137,7 +137,7 @@ describe('gating', () => {
     expect(site.inputs).toHaveLength(0);
   });
 
-  it('stays read-only with the shipped allowlist, which qualifies no profile', async () => {
+  it('stays read-only with an empty allowlist, which qualifies no profile', async () => {
     const site = setup({ qualifiedProfiles: [] });
     expect(await site.apply('heavy')).toMatchObject({ outcome: 'unavailable', reason: 'unqualified-host' });
     expect(await site.restore('heavy')).toMatchObject({ outcome: 'unavailable', reason: 'unqualified-host' });
@@ -145,14 +145,45 @@ describe('gating', () => {
     expect(site.inputs).toHaveLength(0);
   });
 
-  it('stays read-only by default: createPlugin() without options qualifies nothing', async () => {
+  /** `createPlugin()` as a site registers it, with only a staging directory and, in one test, an allowlist. */
+  const shipped = (site: ReturnType<typeof setup>, name: 'apply' | 'restore', qualifiedProfiles?: Array<Record<string, string>>) => {
+    const plugin = createPlugin({ stagingDirectory: join(stagingRoot, 'default'), ...(qualifiedProfiles ? { qualifiedProfiles } : {}) });
+    return (plugin.routes[name] as { handler: Handler }).handler({ ...site.host.ctx, input: { mediaId: 'heavy' } }) as Promise<ActionOutcome>;
+  };
+
+  it('by default, createPlugin() without options applies and restores on the qualified profile', async () => {
     const site = setup();
-    const plugin = createPlugin({ stagingDirectory: join(stagingRoot, 'default') });
-    const outcome = (await (plugin.routes.apply as { handler: Handler }).handler({
-      ...site.host.ctx,
-      input: { mediaId: 'heavy' },
-    })) as ActionOutcome;
-    expect(outcome).toMatchObject({ outcome: 'unavailable', reason: 'unqualified-host' });
+    expect(site.safe.support.profile).toEqual({ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' });
+    const original = Buffer.from(site.media('heavy').bytes!);
+    expect(await shipped(site, 'apply')).toMatchObject({ outcome: 'optimized' });
+    expect(site.safe.calls.replace).toBe(1);
+    expect(Buffer.from(site.media('heavy').bytes!)).not.toEqual(original);
+    expect(await shipped(site, 'restore')).toMatchObject({ outcome: 'restored' });
+    expect(Buffer.from(site.media('heavy').bytes!)).toEqual(original);
+  });
+
+  it('by default, stays read-only on every other profile: a different, missing or extra field', async () => {
+    for (const [profile, named] of [
+      [{ ...LOCAL_PROFILE, storage: 's3' }, /storage s3/],
+      [{ ...LOCAL_PROFILE, database: 'd1' }, /database d1/],
+      [{ ...LOCAL_PROFILE, locks: 'distributed' }, /locks distributed/],
+      [{ runtime: 'node', database: 'sqlite', storage: 'local' }, /storage local/],
+      [{ ...LOCAL_PROFILE, replicas: 'many' }, /replicas many/],
+    ] as Array<[Record<string, string>, RegExp]>) {
+      const site = setup({ safe: { profile } });
+      const before = Buffer.from(site.media('heavy').bytes!);
+      const outcome = await shipped(site, 'apply');
+      expect(outcome).toMatchObject({ outcome: 'unavailable', reason: 'unqualified-host' });
+      expect(outcome.outcome === 'unavailable' && outcome.message).toMatch(named);
+      expect(await shipped(site, 'restore')).toMatchObject({ outcome: 'unavailable', reason: 'unqualified-host' });
+      expect(site.safe.calls.replace + site.safe.calls.restore).toBe(0);
+      expect(Buffer.from(site.media('heavy').bytes!)).toEqual(before);
+    }
+  });
+
+  it('an empty allowlist passed to createPlugin() keeps the qualified profile read-only', async () => {
+    const site = setup();
+    expect(await shipped(site, 'apply', [])).toMatchObject({ outcome: 'unavailable', reason: 'unqualified-host' });
     expect(site.safe.calls.replace).toBe(0);
   });
 

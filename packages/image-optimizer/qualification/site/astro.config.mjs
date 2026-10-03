@@ -14,7 +14,8 @@ const site = JSON.parse(readFileSync(new URL('./qualify.json', import.meta.url),
 async function plugins() {
   if (site.edition === 'native') {
     const { imageOptimizerPlugin } = await import('image-optimizer');
-    return [imageOptimizerPlugin({ qualifiedProfiles: site.qualifiedProfiles, stagingDirectory: site.stagingDirectory })];
+    // Without `qualifiedProfiles` in `qualify.json`, the plugin as shipped: the adapter's default list.
+    return [imageOptimizerPlugin({ ...(site.qualifiedProfiles ? { qualifiedProfiles: site.qualifiedProfiles } : {}), stagingDirectory: site.stagingDirectory })];
   }
   if (site.edition === 'sandbox') {
     // The registry edition's descriptor (sandboxed format), registered in process.

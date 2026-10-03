@@ -17,14 +17,16 @@ dialog lists one permission, `media:read`: metadata of ready media, without file
 ## Native edition
 
 The same package also provides the report as a native plugin, for a site that cannot use the registry
-or its sandbox. On every host it is **read-only like the registry edition** by default: it reports and
-does not change media. It has the same plugin ID, storage, settings, routes, report page and widget, so
-a site that switches between the editions keeps its scan results and settings. Where the registry
-edition estimates savings from metadata, the native edition can
+or its sandbox. On published EmDash, and on every host except one, it is **read-only like the registry
+edition**: it reports and does not change media. It has the same plugin ID, storage, settings, routes,
+report page and widget, so a site that switches between the editions keeps its scan results and
+settings. Where the registry edition estimates savings from metadata, the native edition can
 [measure them](#measured-savings-native-edition). It also contains
 [apply and restore](#apply-and-restore-native-edition-pilot) and
-[bulk runs](#bulk-runs-and-upload-automation-native-edition-pilot), which stay disabled on every host
-until a hosted profile has been qualified.
+[bulk runs](#bulk-runs-and-upload-automation-native-edition-pilot). These are available on one host
+profile only, as a pilot: EmDash built with this repository's host patches, on Node with SQLite and
+local file storage, one process per site, media served only through the site. Everywhere else they
+are refused and the plugin stays read-only.
 
 A native plugin **runs without isolation, in the site process**. EmDash's capability checks still gate
 what the plugin's context offers, but they are not a security boundary: the plugin's code has the same
@@ -101,14 +103,39 @@ and the processed output is never stored, so it has none.
 ### Apply and restore (native edition, pilot)
 
 The native edition can replace one image in place with its optimized output, and put the original
-back. **Both are disabled on every host.** They need the
+back. **Both are available on one host profile and refused everywhere else.** They need the
 [patched EmDash host](https://github.com/vercoapp/verco-plugins/blob/main/host/emdash/patches/README.md)
 with `safeMedia` configured, which gives native plugins that declare `media:bytes:replace` a fenced
 replace and restore. Published EmDash has no such access: there the plugin does not declare the
-capability and stays read-only. Even on the patched host, the plugin allows apply and restore only
-when the host's reported profile (runtime, database, storage, locks) is on a list of qualified
-profiles, and that list is empty: no profile has passed qualification yet. Elsewhere the report says
-why apply and restore are unavailable, and the routes answer `unavailable` and change nothing.
+capability and stays read-only. On the patched host, the plugin allows apply and restore only when
+the host's reported profile (runtime, database, storage, locks) is, field for field, on the list of
+qualified profiles in `packages/media-host-adapter`. That list has one entry:
+
+```js
+{ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' }
+```
+
+that is, a Node process with SQLite and local file storage whose safe-media locks live in that one
+process. On a host reporting exactly this, apply, restore and bulk runs are on with no option set.
+On any other profile (object storage, D1, another runtime, another lock scheme, a field more or
+less), on an unknown protocol version, or when discovery fails, the report says why apply and restore
+are unavailable, and the routes answer `unavailable` and change nothing.
+
+**What the host's profile does not tell the plugin**, and the operator therefore has to ensure:
+
+- **One process per site.** The locks are in the process; two processes on the same data can
+  interleave replacements. The host reports `locks: 'in-process'` from each of them.
+- **Media served only through the site.** Originals stay in the uploads directory at their public
+  keys; anything serving that directory directly would serve them.
+
+Both are part of the
+[hosted profile](#hosted-profile-node-on-the-host-one-systemd-service-per-site-native-edition-pilot)
+that was run.
+
+**This is a pilot.** The profile was exercised on one VPS, with images generated for the run, on a
+disposable site: no real users, content or traffic. The host patches are a pilot too, pinned to one
+EmDash commit, not a supported version range. Keep backups (see
+[Backup](#backup)), and expect to rebuild the host for every EmDash upgrade.
 
 What has been exercised: the plugin's own tests against an in-memory model of the host, and an
 end-to-end test against the patched host's runtime on Node with SQLite and local storage (run when the
@@ -118,14 +145,14 @@ disposable sites driven over HTTP: one as a systemd service on the host, one in 
 Nothing else: not object storage, D1, Cloudflare or several processes, and not a site with real users
 or content.
 
-For testing only, a site operator can allow a profile explicitly. This is **unsupported** until that
-profile is qualified, and is at the operator's risk:
+A site operator can replace the list. An empty list keeps the plugin read-only on every host:
 
 ```js
-imageOptimizerPlugin({
-  qualifiedProfiles: [{ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' }],
-});
+imageOptimizerPlugin({ qualifiedProfiles: [] });
 ```
+
+Listing any other profile allows apply and restore on a host reporting it. That is **unsupported**
+and at the operator's risk: nothing but the profile above has been exercised.
 
 - **Apply** (button *Apply* per result in the report, or `POST .../apply` with `{ "mediaId": ... }`)
   reads the image's active revision and bytes, re-encodes them with the current preset and metadata
@@ -169,8 +196,8 @@ Both routes accept POST only and require the `plugins:manage` permission.
 ### Bulk runs and upload automation (native edition, pilot)
 
 Bulk runs apply or restore many images through the same fenced path as the buttons above. **They are
-disabled wherever apply and restore are**, which is every host until a hosted profile has been
-qualified; the report then shows no bulk controls, and the routes refuse to start a run. What has been
+available only where apply and restore are**, which is the one qualified host profile; elsewhere the
+report shows no bulk controls, and the routes refuse to start a run. What has been
 exercised is the same as for apply and restore, plus a 1,000-image run against the in-memory model of
 the host with restarts, overlapping workers, editor changes, deletions and lost responses.
 
@@ -230,11 +257,11 @@ staging directories (owned by that user, mode 0700), memory and CPU caps on the 
 `qualification/qualify-site.mjs --runner systemd` builds a disposable EmDash site from the patched
 host and runs it this way, as a transient systemd service, then drives the native edition over HTTP
 the way the admin does. The last clean run is recorded in
-[`qualification/site-host-latest.json`](qualification/site-host-latest.json). **The profile is not
-qualified by this:** `QUALIFIED_HOST_PROFILES` in `packages/media-host-adapter` stays empty, so apply,
-restore and bulk runs stay **disabled by default** on this profile as on every other, and a site
-enables them only with the unsupported `qualifiedProfiles` option. Adding the profile to that list is
-a separate decision.
+[`qualification/site-host-latest.json`](qualification/site-host-latest.json). What the host reports on
+this profile is the one entry of `QUALIFIED_HOST_PROFILES` in `packages/media-host-adapter`, so apply,
+restore and bulk runs are **on by default** here; the run registers the plugin with no
+`qualifiedProfiles` option for everything after its first check. The list rests on this run and the
+tests named above, nothing more: one VPS, generated images, no real site.
 
 **The profile as run.** The pinned EmDash commit with host patches 0001 to 0009 (the git tree of 0009
 is checked), the `emdash` package built from it and every other EmDash package at the pinned
@@ -262,9 +289,10 @@ Docker run below. The service had these properties:
 **What the run checks.** Every image is generated by Sharp, and the admin and editor sign in with
 software passkeys made for the run.
 
-- With no profile allowed, the plugin reports the host's profile and stays read-only; apply and bulk
-  runs refuse and change nothing.
-- With the reported profile allowed: a measured scan of 11 images; a sample that changes no row or
+- With an empty qualified list given explicitly, the plugin reports the host's profile and stays
+  read-only; apply and bulk runs refuse and change nothing.
+- With no list given, the plugin as shipped: the host's reported profile is exactly the qualified
+  one, and the report offers apply and restore. Then a measured scan of 11 images; a sample that changes no row or
   file; apply of one image, after which its unchanged URL serves the new bytes, its ID, storage key,
   alt text, caption and focal point are kept, and the host's operation is fenced on the baseline
   revision; the original is in the private store and none of 13 URL probes (its key, encoded and
@@ -338,9 +366,26 @@ server or proxy mounting it, a public bucket) would serve originals. Serve media
 site; on this profile the data directory's mode 0700 also keeps a proxy running as another user from
 reading it.
 
-Not covered: a reverse proxy in front (the run talks to 127.0.0.1 directly), a persistent unit with
-`Restart=` and boot ordering (the run uses transient units), several sites on one host, real users or
-content.
+Not covered: a reverse proxy in front (the recorded run talks to the site's port directly; see
+below), a persistent unit with `Restart=` and boot ordering (the run uses transient units), several
+sites on one host, real users or content.
+
+**Through a reverse proxy.** With `--proxy caddy` the script starts a throwaway
+[Caddy](https://caddyserver.com/) on 127.0.0.1 in front of the site (a `caddy` binary, or with
+`--proxy-image <image>` a container on the host's network, removed when it stops) and sends every
+request of the run to the proxy; the site's URL and the passkeys' origin are the proxy's. Besides
+the whole checklist it checks that the proxy's adapted configuration listens on loopback only, has
+no handler but a reverse proxy to the site, no file server, no file-system root and no admin
+endpoint; that the proxy answers 502, not content, while the site is down; and that every response
+measured for freshness carries the proxy's `Via` header. It writes
+`qualification/site-host-proxy-latest.json`. **No run through a proxy is recorded yet.**
+
+In both forms the run requests the stored copies of an original (in the uploads directory and in the
+private store) at their file paths under likely static prefixes (`/uploads/...`, `/data/...`,
+`/media/...`, `/private/...` and others) and at their absolute paths, and fails if any answer is the
+original; and the authorization matrix includes a cross-origin request with forged
+`X-Forwarded-Host`, `X-Forwarded-Proto` and `Forwarded` headers. These two additions are in the
+script but not yet in the recorded evidence.
 
 To repeat the run, as root on the host, from a checkout carrying the host patches, with the site
 user created (`useradd --system --no-create-home --shell /usr/sbin/nologin <user>`):
@@ -358,7 +403,7 @@ example in a container, as `<executable> <directory> env <NAME=VALUE...> <comman
 environment must see the work directory at the same real path, since Astro records it in the build
 (a symlink does not do). `--memory-max` and `--cpu-quota` change the caps. It takes about ten minutes,
 leaves the site stopped and its unit gone, and writes `qualification/site-host-latest.json` only when
-every check passed.
+every check passed and the checkout has no uncommitted change; the evidence names the commit.
 
 #### Earlier run on a Docker profile
 
@@ -366,12 +411,13 @@ Before the runtime was decided, the same checklist ran with the site as a child 
 container capped at 2 CPUs and 3 GiB (memory and swap) on the same VPS, without the service sandbox
 or a separate site user. It passed and is kept as additional evidence in
 [`qualification/site-latest.json`](qualification/site-latest.json) (the default `--runner process`):
-first responses were fresh within 16 ms direct and 28 ms transformed. That run also confirmed the
+first responses were fresh within 16 ms direct and 28 ms transformed. It predates the qualified list:
+the plugin was given the profile explicitly. That run also confirmed the
 script by breaking it: sending the CSRF header for the caller that should lack it, ignoring the
 response status so that only the state comparison could catch an apply, and not pausing the run
 before the upgrade each made the run fail.
 
-#### Installing on this profile (unsupported, for testing)
+#### Installing on this profile (pilot)
 
 1. Build the patched host: `pnpm host:checkout`, `pnpm host:pilot` (from a checkout carrying the
    patches), install the pilot as above, then `npx pnpm@11.9.0 build` and
@@ -383,9 +429,9 @@ before the upgrade each made the run fail.
    `safeMedia: { privateDirectory }` with the private directory outside both the uploads and the
    public directories, and Astro's session driver pointed into the data directory
    (`sessionDrivers.fsLite({ base })`), since the code directory is read-only to the service.
-4. Register `imageOptimizerPlugin({ qualifiedProfiles: [<the profile the report names>],
-   stagingDirectory })`, with the staging directory in the data directory. Without
-   `qualifiedProfiles` the plugin stays read-only.
+4. Register `imageOptimizerPlugin({ stagingDirectory })`, with the staging directory in the data
+   directory. Apply and restore are then on, because the host reports the qualified profile; pass
+   `qualifiedProfiles: []` as well to keep the plugin read-only.
 5. Create the site user and its data directory, owned by it and closed to everyone else:
 
    ```sh
@@ -699,8 +745,14 @@ hook and route, because neither the Node runner nor the test hosts enforce it.
 - The report has no link to each image in the media library: Block Kit links can target content,
   plugin pages and settings, but not media items.
 - Tested in the EmDash plugin test hosts, and the native edition on disposable Node sites of the
-  patched host (no real users or content), not on Cloudflare; the report has not been tried with users. The 50 ms CPU limit per invocation on Cloudflare has not been
-  measured.
+  patched host (no real users or content), not on Cloudflare; the report has not been tried with
+  users. The 50 ms CPU limit per invocation on Cloudflare has not been measured.
+- Apply and restore are a pilot on one host profile: the patched EmDash host at one pinned commit, on
+  Node with SQLite and local storage, one process per site, media served only through the site. It
+  was exercised on one VPS with generated images. Not exercised: object storage, D1, Cloudflare,
+  several processes or hosts for one site, a CDN or caching proxy, real photographs at scale, a site
+  with real users, returning to an EmDash without the host patches, and backup and restore with work
+  in progress.
 
 ## Development
 

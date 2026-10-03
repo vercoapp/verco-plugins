@@ -4,9 +4,10 @@
  *
  * - **Gated by qualification.** Every call asks the media host adapter, which accepts the host only
  *   when its discovered protocol and profile are on the qualified-profile allowlist. The shipped
- *   allowlist is empty, so on every host apply and restore are refused and the plugin stays
- *   read-only. A site operator can pass an allowlist through the descriptor's options; that is
- *   unsupported until a hosted profile has been qualified.
+ *   allowlist has one profile (Node, SQLite, local storage, locks in the one site process); on
+ *   every other host apply and restore are refused and the plugin stays read-only. A site operator
+ *   can pass another allowlist through the descriptor's options: an empty one keeps the plugin
+ *   read-only, and any other profile is unsupported.
  * - **Fenced.** Apply reads the active revision, then the bytes, processes them, and submits the
  *   output against that revision. The host publishes only if the revision is still active, keeps the
  *   replaced bytes as a retained original, and refuses output of another format or size. A conflict
@@ -160,8 +161,8 @@ export interface NativeMutationOptions {
   /** The processor, or `null` when Sharp is not installed; called when first needed. */
   processor: () => ImageProcessor | null;
   /**
-   * Host profiles on which apply and restore run. Defaults to the media host adapter's list, which is
-   * empty: no profile has been qualified.
+   * Host profiles on which apply and restore run. Defaults to the media host adapter's list of
+   * qualified profiles; an empty list keeps every host read-only.
    */
   qualifiedProfiles?: readonly HostProfile[];
   /** The private staging area; created on first use in the default directory when absent. */

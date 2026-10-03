@@ -41,9 +41,10 @@ export type HostProfile = Readonly<Record<string, string>>;
 /** Site options of the native edition, passed by EmDash to `createPlugin()`. */
 export interface ImageOptimizerOptions {
   /**
-   * Host profiles on which to allow apply and restore. **Unsupported**: no profile has passed
-   * qualification, so the plugin allows none by default and stays read-only. Listing a profile here
-   * enables apply and restore on a host that reports exactly that profile, at the operator's risk.
+   * Host profiles on which to allow apply and restore, replacing the default list (the media host
+   * adapter's qualified profiles). An empty list keeps the plugin read-only on every host. Listing
+   * any other profile is **unsupported**: it enables apply and restore on a host that reports
+   * exactly that profile, at the operator's risk.
    */
   qualifiedProfiles?: HostProfile[];
   /** Directory for output waiting for the host commit. Defaults to one under the system temporary directory. */
