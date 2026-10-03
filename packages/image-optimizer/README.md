@@ -72,8 +72,8 @@ declares `media:bytes:replace`, used only by [apply and restore](#apply-and-rest
 - **Failures.** A busy, crashed or interrupted encode is tried again in a later tick, up to three
   attempts; other errors, such as a timeout, are recorded as failures and listed in the report.
 - **Pace.** Images are encoded one at a time. A tick handles at most 20 images and starts no new image
-  after 20 seconds, so it finishes well inside the one-minute schedule and leaves the site process its
-  other cores. That is far slower than estimating: at the cap, 10,000 images take more than eight
+  after 15 seconds, so even a tick whose last image runs to the 40-second encode limit ends inside the
+  one-minute schedule, and the site process keeps its other cores. That is far slower than estimating: at the cap, 10,000 images take more than eight
   hours.
 
 **Presets** (setting *Encoding preset*). The report lists the exact Sharp options of the chosen preset.
@@ -208,11 +208,11 @@ the host with restarts, overlapping workers, editor changes, deletions and lost 
   plugin knowing, which this does not show. After an apply or restore, the image's scan result and the
   scan's totals are updated, so the report does not keep offering a saving already made.
 
-**Limits of the local processor.** Inputs up to 24 megapixels and 50 MiB; EmDash lets a plugin read at
-most 16 MiB of a file, so larger files are skipped. One encode is killed after 60 seconds. These
-limits, and the tick bounds above, come from measurements on a development machine (Apple M1 Pro,
-synthetic noise images, worst case about 12 seconds and 1.5 GB at 24 MP) and are provisional until
-measured on hosting hardware.
+**Limits of the local processor.** Inputs up to 24 megapixels and 16 MiB (EmDash lets a plugin read
+at most 16 MiB of a file, so larger files are skipped); lossless WebP up to 12 megapixels. One encode
+is killed after 40 seconds, and at most two run at once, within a budget of 24 million decoded pixels
+in flight (a lossless WebP pixel counts twice). These came from measurements on one VPS under a
+container cap, not from a guarantee: see [Processor limits](#processor-limits).
 
 ## Why it is read-only
 
@@ -305,6 +305,69 @@ well either side of the 1.0 used for `possible-photo-as-png`.
 To repeat or extend this, `pnpm calibrate:fetch-kodak` downloads the suite into the ignored
 `.calibration/` directory and `pnpm calibrate [directory]` measures any directory of lossless
 photographs.
+
+### Processor limits
+
+The local processor's limits (`src/processor/limits.ts`) and the tick bounds were set from
+`calibration/measure-processor.ts` on one VPS: 4 vCPU AMD EPYC 9J45, Debian 13 host, with the work
+run in a container capped at 2 CPUs and 3 GiB (memory and swap), Node 22.16, Sharp 0.35.4, one libvips
+thread per worker. Each image ran alone in a fresh worker. The figures are the worker's peak resident
+memory, read from the kernel, and the encode time, for the largest content measured at each size:
+Gaussian noise (the slowest to encode and the largest) and generated photograph-like images
+(gradients, texture and grain; not real photographs). Output formats and presets are the ones the
+scan offers.
+
+| Input (24 MP, noise) | Encode, balanced / high fidelity | Peak memory | Per megapixel |
+| --- | --- | --- | --- |
+| PNG | 2.1 s | 340 MiB | 14 MiB |
+| JPEG | 4.8 s / 9.3 s | 320 / 550 MiB | 13-23 MiB |
+| Lossy WebP | 4.2 s / 12.3 s | 620 / 810 MiB | 26-34 MiB |
+| Lossless WebP | 4.1 s | 1310 MiB | 55 MiB |
+
+Across sizes, memory grew about linearly with pixels (lossless WebP: 400 MiB at 6 MP, 690 MiB at
+12 MP, 1310 MiB at 24 MP, 1870 MiB at 40 MP; high-fidelity lossy WebP: 280, 440, 810 and 1030 MiB) and
+time did too (high-fidelity lossy WebP: 1.6, 3.2, 12.3 and 20.9 s). Photograph-like content used 58% to
+96% of the noise memory (lossless WebP 1260 MiB at 24 MP). It encoded JPEG and lossy WebP in 20% to 40%
+of the noise time, but PNG (5.5 s at 24 MP, 9.2 s at 40 MP) and lossless WebP (5.3 s, 9.2 s) slower,
+because noise is their cheap case. The slowest 24 MP encode of all was high-fidelity lossy WebP of
+noise, 12.3 s alone and 12.8 s beside a second worker.
+
+Two workers at once at 24 MP, with no admission limit, to see whether the cap holds:
+
+| Two concurrent encodes, 24 MP | Peak container memory | Result |
+| --- | --- | --- |
+| PNG, JPEG, lossy WebP (noise) | 750 to 1960 MiB | completed |
+| PNG, JPEG, lossy WebP (photograph-like) | 540 to 1410 MiB | completed |
+| Lossless WebP (noise) | 3070 of 3072 MiB | out of memory: the kernel killed workers |
+| Lossless WebP (photograph-like) | 2930 to 3040 of 3072 MiB | completed, at the cap |
+
+At 40 MP two lossy WebP encodes (high fidelity, noise) reached 2790 MiB, and two lossless WebP
+encodes did not fit. So the defaults are:
+
+| Limit | Value | Because |
+| --- | --- | --- |
+| Pixels per image | 24 MP | one lossy encode of it peaks at 810 MiB |
+| Pixels per lossless WebP image | 12 MP | about 58 MiB per megapixel: 700 MiB at 12 MP, 1300 MiB at 24 MP |
+| Decoded pixels in flight | 24 million, a lossless WebP pixel counting twice | every admitted mix stays under about 900 MiB of worker memory; with two 12 MP encodes the whole container peaked at 1.5 GiB, including the measuring script, leaving at least 1.5 GiB of the 3 GiB for the site |
+| Workers at once | 2 | two CPUs; memory is bounded by the pixel budget, not the count |
+| Time per encode | 40 s | three times the slowest 24 MP encode, for a site sharing the two CPUs |
+| Input size | 16 MiB | the host's read limit; also bounds the copies the parent holds |
+| Per tick | 20 images, none started after 15 s | with the 40 s kill, a tick ends within 55 s of a 60 s interval |
+
+With these defaults in place, two 23.9 MP photograph-like encodes started at once ran one and refused
+the other as busy, with no memory kill, and two 12 MP encodes both ran. The input limit decides most
+of the rest: noise at 24 MP, a PNG of a photograph-like image above about 5 MP and a lossless WebP above
+about 10 MP are larger than 16 MiB and are skipped before any worker starts. The "24 MP" images above are 5657 × 4243
+(24.002 million pixels), just over the pixel limit; a 6000 × 4000 image is within it.
+
+Work that does not fit the budget is refused as busy and tried again in a later tick; images over a
+limit are skipped. These limits keep encodes within the cap on this hardware with the site using the
+rest of the memory, not on any other: the site's own memory use, other Sharp versions and slower or
+busier CPUs change the figures, so repeat the measurement (`node --experimental-strip-types
+calibration/measure-processor.ts`, run inside the deployment's cap; `--concurrent=2` repeats the
+two-worker test) before relying on them elsewhere. A worker's own report of its peak memory also
+counts the parent's memory at the moment it was started, so the script reads the kernel's figure for
+the worker instead.
 
 Each plugin invocation makes at most 10 calls to EmDash: on Cloudflare every storage, KV, settings,
 media, cron and log call counts toward the sandbox's subrequest limit, which is 10 by default. That

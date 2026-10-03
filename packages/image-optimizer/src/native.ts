@@ -62,8 +62,8 @@ export function imageOptimizerPlugin(options: ImageOptimizerOptions = {}): Plugi
 }
 
 /**
- * How long EmDash waits for the scheduled task: a tick's wall-time bound (20 s), plus one image that
- * started just before it, up to the processor's wall-time kill (60 s), plus the host commit.
+ * How long EmDash waits for the scheduled task: a tick's wall-time bound (15 s), plus one image that
+ * started just before it, up to the processor's wall-time kill (40 s), plus the host commit.
  */
 export const CRON_HOOK_TIMEOUT_MS = MEASURED_TICK_WALL_MS + DEFAULT_PROCESSOR_LIMITS.wallTimeMs + 30_000;
 
@@ -155,7 +155,7 @@ export function createNativePlugin(options: NativeScanOptions & Partial<Omit<Nat
     hooks: {
       cron: {
         // EmDash stops waiting for a hook after 5 s by default; a measured or bulk tick starts no
-        // new image after 20 s, and one image may take up to the processor's 60 s wall time.
+        // new image after 15 s, and one image may take up to the processor's 40 s wall time.
         timeout: CRON_HOOK_TIMEOUT_MS,
         handler: async (event, ctx) => {
           if (event.name !== BULK_TASK) return handleCron(event, ctx, native);

@@ -43,8 +43,15 @@ import {
   xmpHasGps,
   type ContainerInfo,
 } from './container.ts';
-import { createPixelAdmission, resolveProcessorLimits, type ProcessorLimits } from './limits.ts';
-import { encoderOptions, isPresetName, PRESET_NAMES, PRESETS_REVISION, type PresetName } from './presets.ts';
+import { createPixelAdmission, encoderLimits, resolveProcessorLimits, type ProcessorLimits } from './limits.ts';
+import {
+  encoderOptions,
+  encoderTarget,
+  isPresetName,
+  PRESET_NAMES,
+  PRESETS_REVISION,
+  type PresetName,
+} from './presets.ts';
 import { WORKER_SOURCE } from './worker-source.ts';
 
 export const LOCAL_PROCESSOR_ID = 'local-sharp';
@@ -165,7 +172,8 @@ function skip(reason: ProcessSkipReason, detail?: string, input?: Partial<ImageI
 function headerSkip(header: WorkerHeader, container: ContainerInfo, limits: ProcessorLimits): SkippedImage | null {
   if (header.format !== container.format) return skip('malformed', `content decodes as ${header.format}`);
   if (header.pages > 1 || container.animated) return skip('animated');
-  if (header.width * header.height > limits.maxPixels) return skip('over-pixel-limit');
+  const { maxPixels } = encoderLimits(limits, encoderTarget(header.format as ProcessorFormat, container.lossless));
+  if (header.width * header.height > maxPixels) return skip('over-pixel-limit');
   if (header.depth !== 'uchar') return skip('unhandled-bit-depth', header.depth);
   const rgb = header.space === 'srgb' && (header.channels === 3 || header.channels === 4);
   const grey = header.space === 'b-w' && (header.channels === 1 || header.channels === 2);
@@ -450,7 +458,8 @@ export function createLocalProcessor(options: LocalProcessorOptions = {}): Image
             child.kill('SIGKILL');
             return;
           }
-          release = admission.tryAcquire(current.width * current.height);
+          const { weight } = encoderLimits(limits, encoderTarget(current.format as ProcessorFormat, prepared.container.lossless));
+          release = admission.tryAcquire(current.width * current.height * weight);
           if (!release) {
             kill(new ImageProcessorError('busy', 'The decoded-pixel budget is in use'));
             return;

@@ -41,19 +41,24 @@ import { imageFormat, worthReporting, type ScanOptions } from './scanner.ts';
  *
  * - Images are processed one at a time, so a tick holds at most one of the processor's two workers
  *   and leaves the other for a sample, and the site keeps its other cores.
- * - A tick starts no new image after `MEASURED_TICK_WALL_MS`, a third of the cron interval, so ticks
- *   normally finish well before the next one is due. One image already started can run past it, up
- *   to the processor's own wall-time kill (60 s).
+ * - A tick starts no new image after `MEASURED_TICK_WALL_MS` (15 s, a quarter of the cron interval).
+ *   One image already started can run past it, up to the processor's own wall-time kill (40 s), so
+ *   even a tick whose last image runs to that kill ends within 55 s, inside the one-minute interval,
+ *   and the tick's own reads and writes after it take the rest. Normally the last image is fast: the
+ *   slowest 24 MP encode measured was 12.3 s, so a tick that meets only such images ends within
+ *   about 28 s.
  * - `MEASURED_ITEMS_PER_TICK` caps the images per tick when they are fast, so the bytes read and the
- *   storage written per tick stay small. At this cap a 10,000-image library takes at least eight
- *   hours, against half an hour for the metadata estimate.
+ *   storage written per tick stay small. Web-sized images (2-6 MP) took 0.1-1.5 s each to encode on
+ *   the measured VPS, so 20 of them use 2-30 s: the wall-time bound, not the count, ends a tick of
+ *   larger images. At this cap a 10,000-image library takes at least eight hours, against half an
+ *   hour for the metadata estimate.
  *
- * The provisional processor measurements (development machine, noise images) put a 24 MP worst case
- * at about 12 s; web-sized images take well under a second. Both values are starting points until
- * encode times are measured on the hosting hardware.
+ * The encode times are from `calibration/measure-processor.ts` on one VPS (4 vCPU AMD EPYC 9J45,
+ * container capped at 2 CPUs and 3 GiB, Node 22.16); see `src/processor/limits.ts` for the figures.
+ * Other hardware or a busy site can differ.
  */
 export const MEASURED_ITEMS_PER_TICK = 20;
-export const MEASURED_TICK_WALL_MS = 20_000;
+export const MEASURED_TICK_WALL_MS = 15_000;
 /** Attempts per item for retryable processor errors (`busy`, `crashed`, `aborted`) before it is recorded as failed. */
 export const MAX_ATTEMPTS = 3;
 /** Items waiting for a retry, kept in the run record; beyond this, a retryable error is recorded as a failure. */

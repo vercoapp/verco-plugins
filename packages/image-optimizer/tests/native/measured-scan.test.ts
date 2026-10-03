@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import type { StoredResult } from '../../src/job.ts';
 import { MAX_ATTEMPTS, MEASURED_ITEMS_PER_TICK, MEASURED_TICK_WALL_MS, type MeasureLimits } from '../../src/measure.ts';
 import { createNativePlugin } from '../../src/native.ts';
+import { DEFAULT_PROCESSOR_LIMITS } from '../../src/processor/limits.ts';
 import sandboxPlugin from '../../src/plugin.ts';
 import { ImageProcessorError, type ImageProcessor, type ProcessorErrorCode } from '../../src/processor/contract.ts';
 import { createLocalProcessor } from '../../src/processor/local.ts';
@@ -212,6 +213,10 @@ describe('measured scan', () => {
   it('uses conservative defaults', () => {
     expect(MEASURED_ITEMS_PER_TICK).toBeLessThanOrEqual(20);
     expect(MEASURED_TICK_WALL_MS).toBeLessThanOrEqual(30_000);
+    // A tick whose last image runs to the processor's kill still ends inside the one-minute cron interval.
+    expect(MEASURED_TICK_WALL_MS + DEFAULT_PROCESSOR_LIMITS.wallTimeMs).toBeLessThan(60_000);
+    // ...and a tick that meets only the slowest measured 24 MP encode (12.3 s) ends within half of it.
+    expect(MEASURED_TICK_WALL_MS + 12_300).toBeLessThanOrEqual(30_000);
   });
 
   it('retries busy, crashed and aborted items in a later tick, and records them when they keep failing', async () => {

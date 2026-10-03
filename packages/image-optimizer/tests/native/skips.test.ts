@@ -101,6 +101,38 @@ describe('skip reasons come from the bytes, not a name or MIME type', () => {
     );
   });
 
+  it('applies a lower pixel limit to lossless WebP only', async () => {
+    const pixels = WIDTH * HEIGHT;
+    const lossless = await photo().webp({ lossless: true }).toBuffer();
+    const lossy = await photo().webp().toBuffer();
+    const limits = { maxPixels: pixels, maxInFlightPixels: pixels, pixelWeightByEncoder: {} };
+    const lowered = createLocalProcessor({ limits: { ...limits, maxPixelsByEncoder: { 'webp-lossless': pixels - 1 } } });
+    expect(await lowered.process({ bytes: lossless, preset: 'balanced' })).toMatchObject({
+      status: 'skipped',
+      reason: 'over-pixel-limit',
+      input: { width: WIDTH, height: HEIGHT },
+    });
+    expect((await lowered.process({ bytes: lossy, preset: 'balanced' })).status).toBe('processed');
+    const exact = createLocalProcessor({ limits: { ...limits, maxPixelsByEncoder: { 'webp-lossless': pixels } } });
+    expect((await exact.process({ bytes: lossless, preset: 'balanced' })).status).toBe('processed');
+    // A weight that makes one image cost more than the whole budget lowers the limit the same way.
+    const weighted = createLocalProcessor({ limits: { ...limits, pixelWeightByEncoder: { 'webp-lossless': 2 } } });
+    expect(await weighted.process({ bytes: lossless, preset: 'high-fidelity' })).toMatchObject({
+      status: 'skipped',
+      reason: 'over-pixel-limit',
+    });
+  });
+
+  it('skips a lossless WebP over the default limit of 12 megapixels before encoding it', async () => {
+    const flat = sharp({ create: { width: 4000, height: 3100, channels: 3, background: '#336699' } });
+    const bytes = await flat.webp({ lossless: true, effort: 0 }).toBuffer();
+    expect(await processor.process({ bytes, preset: 'balanced' })).toMatchObject({
+      status: 'skipped',
+      reason: 'over-pixel-limit',
+      input: { width: 4000, height: 3100 },
+    });
+  });
+
   it('skips CMYK, whose conversion would change colours', async () => {
     const bytes = await photo().toColourspace('cmyk').jpeg().toBuffer();
     expect(await processor.process({ bytes, preset: 'balanced' })).toMatchObject({

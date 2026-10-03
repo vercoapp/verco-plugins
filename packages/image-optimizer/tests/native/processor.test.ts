@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { ImageProcessorError, type ProcessResult } from '../../src/processor/contract.ts';
-import { DEFAULT_PROCESSOR_LIMITS, createPixelAdmission, resolveProcessorLimits } from '../../src/processor/limits.ts';
+import {
+  DEFAULT_PROCESSOR_LIMITS,
+  createPixelAdmission,
+  encoderLimits,
+  resolveProcessorLimits,
+} from '../../src/processor/limits.ts';
 import { createLocalProcessor, type LocalProcessorOptions } from '../../src/processor/local.ts';
 import { HEIGHT, WIDTH, photo } from './fixtures.ts';
 
@@ -47,6 +52,48 @@ describe('limits', () => {
     expect(() => resolveProcessorLimits({ wallTimeMs: 1.5 })).toThrow(RangeError);
     expect(() => resolveProcessorLimits({ maxPixels: 10, maxInFlightPixels: 9 })).toThrow(/at least one/);
     expect(resolveProcessorLimits()).toEqual(DEFAULT_PROCESSOR_LIMITS);
+  });
+
+  it('rejects unusable per-encoder limits', () => {
+    expect(() => resolveProcessorLimits({ maxPixelsByEncoder: { 'webp-lossless': 0 } })).toThrow(RangeError);
+    expect(() => resolveProcessorLimits({ pixelWeightByEncoder: { 'webp-lossless': 1.5 } })).toThrow(RangeError);
+    // @ts-expect-error: not a table
+    expect(() => resolveProcessorLimits({ pixelWeightByEncoder: 2 })).toThrow(RangeError);
+  });
+
+  it('keeps the defaults inside a 3 GiB, two CPU container, from the measured memory per pixel', () => {
+    // Worst-case worker memory per decoded pixel at 24 MP (noise, high fidelity), in bytes.
+    const measured = { jpeg: 23, png: 14, webp: 34, 'webp-lossless': 58 } as const;
+    const limits = resolveProcessorLimits();
+    // Any mix of encodes the budget admits needs less than 1 GB of worker memory, with 75 MB per
+    // worker for the runtime beyond the decoded pixels.
+    let worst = 0;
+    for (const target of Object.keys(measured) as Array<keyof typeof measured>) {
+      const { maxPixels, weight } = encoderLimits(limits, target);
+      const admitted = Math.min(limits.maxInFlightPixels / weight, maxPixels * limits.maxWorkers);
+      worst = Math.max(worst, admitted * measured[target] + limits.maxWorkers * 75e6);
+    }
+    expect(worst).toBeLessThan(1e9);
+    expect(limits.maxWorkers).toBeLessThanOrEqual(2);
+    // One lossless WebP image may not use more than 0.8 GB alone, whatever the budget says.
+    expect(limits.maxPixelsByEncoder['webp-lossless']).toBeLessThanOrEqual(12_000_000);
+    expect(encoderLimits(limits, 'webp-lossless').maxPixels * measured['webp-lossless']).toBeLessThan(0.8e9);
+    // The slowest measured 24 MP encode took 12.8 s; the wall time leaves a factor of three.
+    expect(limits.wallTimeMs).toBeLessThanOrEqual(45_000);
+    expect(limits.wallTimeMs).toBeGreaterThanOrEqual(3 * 12_800);
+  });
+
+  it('lowers an encoder limit to what the budget can admit', () => {
+    const limits = resolveProcessorLimits({
+      maxPixels: 100,
+      maxInFlightPixels: 150,
+      maxPixelsByEncoder: { png: 80 },
+      pixelWeightByEncoder: { 'webp-lossless': 2, webp: 4 },
+    });
+    expect(encoderLimits(limits, 'jpeg')).toEqual({ maxPixels: 100, weight: 1 });
+    expect(encoderLimits(limits, 'png')).toEqual({ maxPixels: 80, weight: 1 });
+    expect(encoderLimits(limits, 'webp-lossless')).toEqual({ maxPixels: 75, weight: 2 });
+    expect(encoderLimits(limits, 'webp')).toEqual({ maxPixels: 37, weight: 4 });
   });
 
   it('admits pixels up to the budget and releases each reservation once', () => {
@@ -189,6 +236,36 @@ describe('local processor', () => {
 
     delete options.fault;
     processed(await processor.process({ bytes: jpeg, preset: 'balanced' }));
+  });
+
+  it('counts the pixels of a heavier encoder more than once against the budget', async () => {
+    const lossless = await photo().webp({ lossless: true }).toBuffer();
+    const limits = {
+      wallTimeMs: 1500,
+      maxWorkers: 2,
+      maxPixels: PIXELS,
+      maxInFlightPixels: 2 * PIXELS,
+      pixelWeightByEncoder: { 'webp-lossless': 2 },
+    };
+    const heavy = createLocalProcessor({ limits, fault: { kind: 'hang', stage: 'encode' } });
+    const [a, b] = await Promise.allSettled([
+      heavy.process({ bytes: lossless, preset: 'balanced' }),
+      heavy.process({ bytes: lossless, preset: 'balanced' }),
+    ]);
+    // The first holds the whole budget until its wall time; the second does not fit beside it.
+    const codes = [a, b].map((outcome) => ((outcome as PromiseRejectedResult).reason as ImageProcessorError).code);
+    expect(codes.sort()).toEqual(['busy', 'timeout']);
+
+    // The same size of an encoder counted once: both fit and both run until their wall time.
+    const light = createLocalProcessor({ limits, fault: { kind: 'hang', stage: 'encode' } });
+    const pair = await Promise.allSettled([
+      light.process({ bytes: jpeg, preset: 'balanced' }),
+      light.process({ bytes: jpeg, preset: 'balanced' }),
+    ]);
+    expect(pair.map((outcome) => ((outcome as PromiseRejectedResult).reason as ImageProcessorError).code)).toEqual([
+      'timeout',
+      'timeout',
+    ]);
   });
 
   it('refuses work beyond the worker limit', async () => {
