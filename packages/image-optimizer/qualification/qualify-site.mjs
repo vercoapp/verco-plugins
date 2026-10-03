@@ -35,7 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { createClient, expectOk, inviteUser, logIn, setUpSite } from './http.mjs';
-import { buildSite, createSite, installedPluginVersion, installPlugin, packHost, packPlugin, startSite, useBuildWrapper } from './site.mjs';
+import { build, buildSite, createSite, installedPluginVersion, installPlugin, packHost, packPlugin, startSite, useBuildWrapper } from './site.mjs';
 import { createSystemdRunner } from './systemd.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -70,6 +70,7 @@ const paths = {
   uploads: join(work, 'data/uploads'),
   private: join(work, 'data/private'),
   staging: join(work, 'data/staging'),
+  sessions: join(work, 'data/sessions'),
 };
 const origin = `http://127.0.0.1:${Number(args.port)}`;
 
@@ -311,12 +312,13 @@ function siteConfig(edition) {
     databasePath: paths.database,
     uploadsDirectory: paths.uploads,
     privateDirectory: paths.private,
+    // Under systemd the site's code is read-only, so Astro's sessions live with the data.
+    ...(hosted ? { sessionsDirectory: paths.sessions } : {}),
   };
 }
 
 async function restartAs(edition, label) {
-  if (site) await site.stop();
-  site = null;
+  await stopSite();
   await buildSite(paths.site, siteConfig(edition));
   site = hosted ? await hosted.start() : await startSite(paths.site, { port: Number(args.port), logFile: join(paths.logs, 'site.log') });
   if (hosted) checkUnit(label);
@@ -443,7 +445,7 @@ async function main() {
   for (const directory of [paths.packages, paths.logs]) await mkdir(directory, { recursive: true });
   if (hosted) {
     // The layout an operator prepares: one data directory for the site user, nothing for others.
-    for (const directory of [paths.data, paths.uploads, paths.private, paths.staging]) hosted.prepareDirectory(directory);
+    for (const directory of [paths.data, paths.uploads, paths.private, paths.staging, paths.sessions]) hosted.prepareDirectory(directory);
   } else {
     await mkdir(paths.uploads, { recursive: true });
   }
@@ -516,7 +518,12 @@ async function main() {
     assert.deepEqual(servers.map((entry) => entry.pid), [pid], 'not exactly the one site process');
     assert.equal(hosted.state().MainPID, pid);
     assert.ok((await fetch(`${origin}/_emdash/api/health`)).status < 500);
-    passed('a second process for the site is not started', { runnerRefusal: refusal, systemdRefusal: duplicate.stderr.split('\n')[0], serverProcesses: servers.length });
+    const unitName = new RegExp(hosted.unit.replaceAll('.', '\\.'), 'g');
+    passed('a second process for the site is not started', {
+      runnerRefusal: refusal.replace(unitName, '<unit>'),
+      systemdRefusal: duplicate.stderr.split('\n')[0].replace(unitName, '<unit>'),
+      serverProcesses: servers.length,
+    });
   }
 
   const before = snapshot();
@@ -569,13 +576,13 @@ async function main() {
       const result = byId.get(heavyIds[index]);
       return { name: fixture.name, megapixels: Number(((fixture.width * fixture.height) / 1e6).toFixed(1)), bytes: fixture.bytes.length, status: result?.status, basis: result?.basis, reason: result?.reason ?? null };
     });
-    for (const outcome of outcomes) assert.ok(['flagged', 'ok'].includes(outcome.status) && outcome.basis === 'measured', `near-limit scan: ${JSON.stringify(outcome)}`);
     const cgroup = hosted.cgroup();
     assert.equal(cgroup.memoryEvents.oom ?? 0, 0, `memory.events: ${JSON.stringify(cgroup.memoryEvents)}`);
     assert.equal(cgroup.memoryEvents.oom_kill ?? 0, 0, `memory.events: ${JSON.stringify(cgroup.memoryEvents)}`);
+    for (const outcome of outcomes) assert.ok(['flagged', 'ok'].includes(outcome.status) && outcome.basis === 'measured', `near-limit scan: ${JSON.stringify(outcome)}`);
     passed('a measured scan near the processor limits does not run out of memory under the caps', {
       images: outcomes,
-      sampleBesideScan: besideScan.status,
+      sampleBesideScan: { status: besideScan.status, refusedAsBusy: /busy/i.test(JSON.stringify(besideScan.body)) },
       ...workers,
       memoryMax: cgroup.memoryMax,
       memoryPeakBytes: cgroup.memoryPeakBytes,
@@ -897,7 +904,7 @@ async function main() {
 
 /** The pilot's identity without rebuilding it, for `--reuse-packages`. */
 function reusedHost(pilot) {
-  const git = (...parameters) => execFileSync('git', parameters, { cwd: pilot, encoding: 'utf8' }).trim();
+  const git = (...parameters) => build('git', parameters, { cwd: pilot }).trim();
   return { tarball: null, commit: git('rev-parse', 'HEAD'), tree: git('write-tree') };
 }
 

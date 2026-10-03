@@ -34,7 +34,9 @@ export const HARDENING = [
   'LockPersonality=yes',
   'SystemCallArchitectures=native',
   'CapabilityBoundingSet=',
-  'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6',
+  // AF_NETLINK: `os.networkInterfaces()`, which the site calls while rendering, lists interfaces
+  // over netlink and fails without it.
+  'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK',
   'IPAddressDeny=any',
   'IPAddressAllow=localhost',
   'UMask=0077',
@@ -106,7 +108,9 @@ export function createSystemdRunner({ unit, user, node, siteDirectory, dataDirec
   const gid = Number(exec('id', ['-g', user]).trim());
   const origin = `http://127.0.0.1:${port}`;
   const caps = [`MemoryMax=${memoryMax}`, 'MemorySwapMax=0', `CPUQuota=${cpuQuota}`];
-  const properties = [...caps, ...HARDENING, `ReadWritePaths=${dataDirectory}`, 'TimeoutStopSec=30'];
+  // OOMPolicy=continue: when the kernel kills a processor worker for memory, the site keeps serving
+  // and the processor retries the image as crashed. The default, stop, takes the whole site down.
+  const properties = [...caps, 'OOMPolicy=continue', ...HARDENING, `ReadWritePaths=${dataDirectory}`, 'TimeoutStopSec=30'];
   const expected = {
     memoryMax: String(parseBytes(memoryMax)),
     swapMax: '0',
@@ -147,6 +151,7 @@ export function createSystemdRunner({ unit, user, node, siteDirectory, dataDirec
 
   return {
     kind: 'systemd',
+    unit,
     properties,
     expected,
     uid,
@@ -207,7 +212,8 @@ export function createSystemdRunner({ unit, user, node, siteDirectory, dataDirec
           const memory = directory
             ? { events: parseEvents(readOrNull(join(directory, 'memory.events'))), peakBytes: Number(readOrNull(join(directory, 'memory.peak'))) || null }
             : null;
-          exec('systemctl', ['stop', unit]);
+          // The unit may have stopped already, or been collected after failing; its journal is kept anyway.
+          spawnSync('systemctl', ['stop', unit], { stdio: 'ignore' });
           for (let attempt = 0; running(); attempt += 1) {
             if (attempt === 60) throw new Error(`${unit} did not stop`);
             await sleep(500);
@@ -277,6 +283,7 @@ export function createSystemdRunner({ unit, user, node, siteDirectory, dataDirec
       };
       sample();
       const timer = setInterval(sample, intervalMs);
+      timer.unref();
       return {
         stop() {
           clearInterval(timer);

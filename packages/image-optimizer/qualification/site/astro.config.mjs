@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 
 import node from '@astrojs/node';
 import react from '@astrojs/react';
-import { defineConfig } from 'astro/config';
+import { defineConfig, sessionDrivers } from 'astro/config';
 import emdash, { local } from 'emdash/astro';
 import { sqlite } from 'emdash/db';
 
@@ -28,6 +28,8 @@ export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
   site: site.origin,
+  // Sessions are site state: kept with the data, not in `node_modules/.astro` beside the code.
+  ...(site.sessionsDirectory ? { session: { driver: sessionDrivers.fsLite({ base: site.sessionsDirectory }) } } : {}),
   integrations: [
     react(),
     emdash({

@@ -28,7 +28,8 @@ let buildWrapper = null;
 /**
  * Runs every later build step as `<wrapper> <directory> env <NAME=VALUE...> <command> <args...>`: the
  * wrapper runs the command in that directory of a build environment that sees the same paths, such
- * as a container with the work directory mounted at the same absolute path. Without a wrapper, build
+ * as a container with the work directory mounted at the same absolute path (a mount, not a symlink:
+ * Astro records real paths in the build). Without a wrapper, build
  * steps run in this process's environment.
  */
 export function useBuildWrapper(wrapper) {
@@ -36,7 +37,7 @@ export function useBuildWrapper(wrapper) {
 }
 
 /** A build step: run directly, or through the build wrapper with the given extra environment. */
-function build(command, args, { cwd, env = {} }) {
+export function build(command, args, { cwd, env = {} }) {
   if (!buildWrapper) return run(command, args, { cwd, env: { ...process.env, ...env } });
   const assignments = Object.entries(env).map(([name, value]) => `${name}=${value}`);
   return run(buildWrapper, [cwd, 'env', ...assignments, command, ...args]);
@@ -116,6 +117,8 @@ export function installedPluginVersion(siteDirectory) {
 export async function buildSite(siteDirectory, config) {
   await writeFile(join(siteDirectory, 'qualify.json'), `${JSON.stringify(config, null, 2)}\n`);
   await rm(join(siteDirectory, 'dist'), { recursive: true, force: true });
+  // Astro writes the site's real path into the build, so a build wrapper must see the site at the
+  // real path it runs from (a symlink does not do).
   build(join(siteDirectory, 'node_modules/.bin/astro'), ['build'], { cwd: siteDirectory, env: { ASTRO_TELEMETRY_DISABLED: '1' } });
 }
 

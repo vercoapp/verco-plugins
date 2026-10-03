@@ -46,8 +46,9 @@ so a site with both the native edition and the registry edition would run two co
 you switch, remove one first.
 
 The package is not published to npm yet. Besides its tests against the plugin context, the native
-edition has run on one disposable EmDash site built from the patched host; see
-[Site run](#site-run-on-a-provisional-docker-profile-native-edition-pilot).
+edition has run on disposable EmDash sites built from the patched host, on the hosted profile (Node
+on the host, one systemd service per site) and earlier in a Docker container; see
+[Hosted profile](#hosted-profile-node-on-the-host-one-systemd-service-per-site-native-edition-pilot).
 
 ### Measured savings (native edition)
 
@@ -111,10 +112,11 @@ why apply and restore are unavailable, and the routes answer `unavailable` and c
 
 What has been exercised: the plugin's own tests against an in-memory model of the host, and an
 end-to-end test against the patched host's runtime on Node with SQLite and local storage (run when the
-pilot checkout from `pnpm host:pilot` is present), and one
-[site run](#site-run-on-a-provisional-docker-profile-native-edition-pilot) on a disposable site in a
-Docker container, driven over HTTP. Nothing else: not object storage, D1, Cloudflare or several
-processes, and not a site with real users or content.
+pilot checkout from `pnpm host:pilot` is present), and
+[site runs](#hosted-profile-node-on-the-host-one-systemd-service-per-site-native-edition-pilot) on
+disposable sites driven over HTTP: one as a systemd service on the host, one in a Docker container.
+Nothing else: not object storage, D1, Cloudflare or several processes, and not a site with real users
+or content.
 
 For testing only, a site operator can allow a profile explicitly. This is **unsupported** until that
 profile is qualified, and is at the operator's risk:
@@ -215,34 +217,57 @@ the host with restarts, overlapping workers, editor changes, deletions and lost 
 at most 16 MiB of a file, so larger files are skipped); lossless WebP up to 12 megapixels. One encode
 is killed after 40 seconds, and at most two run at once, within a budget of 24 million decoded pixels
 in flight (a lossless WebP pixel counts twice). These came from measurements on one VPS under a
-container cap, not from a guarantee: see [Processor limits](#processor-limits).
+container cap, not from a guarantee: see [Processor limits](#processor-limits). The same limits held
+under the hosted profile's service caps in one scan of images near them, without an out-of-memory kill.
 
-### Site run on a provisional Docker profile (native edition, pilot)
+### Hosted profile: Node on the host, one systemd service per site (native edition, pilot)
 
-`qualification/qualify-site.mjs` builds a disposable EmDash site from the patched host and drives the
-native edition over HTTP the way the admin does. **It does not qualify a profile.** The host
-runtime for sites is not decided yet, so this Docker profile is provisional:
-`QUALIFIED_HOST_PROFILES` in `packages/media-host-adapter` stays empty, apply and restore stay
-disabled by default, and a site enables them only with the unsupported `qualifiedProfiles` option.
-The last clean run is recorded in [`qualification/site-latest.json`](qualification/site-latest.json).
+The hosted profile for sites is a Node process on the host (no container), run as a systemd service
+of its own under its own Unix user, with its own SQLite database, uploads, private originals and
+staging directories (owned by that user, mode 0700), memory and CPU caps on the service, bound to
+127.0.0.1 behind a reverse proxy, **exactly one process per site**.
 
-**The profile.** The pinned EmDash commit with host patches 0001 to 0009 (the git tree of 0009 is
-checked), the `emdash` package built from it and every other EmDash package at the pinned published
-version, Astro 7.3.2 with `@astrojs/node` 11.1.5 (standalone), SQLite through `node:sqlite`, local
-storage, `safeMedia` with a private directory outside the uploads and public directories, Sharp
-0.35.4, one Node 22.16 process bound to 127.0.0.1, in a Docker container capped at 2 CPUs and 3 GiB
-(memory and swap) on a 4 vCPU AMD EPYC VPS. The host reports this profile as
-`{ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' }`.
+`qualification/qualify-site.mjs --runner systemd` builds a disposable EmDash site from the patched
+host and runs it this way, as a transient systemd service, then drives the native edition over HTTP
+the way the admin does. The last clean run is recorded in
+[`qualification/site-host-latest.json`](qualification/site-host-latest.json). **The profile is not
+qualified by this:** `QUALIFIED_HOST_PROFILES` in `packages/media-host-adapter` stays empty, so apply,
+restore and bulk runs stay **disabled by default** on this profile as on every other, and a site
+enables them only with the unsupported `qualifiedProfiles` option. Adding the profile to that list is
+a separate decision.
 
-**What the run checks**, every image generated by Sharp, admin and editor signed in with software
-passkeys made for the run:
+**The profile as run.** The pinned EmDash commit with host patches 0001 to 0009 (the git tree of 0009
+is checked), the `emdash` package built from it and every other EmDash package at the pinned
+published version, Astro 7.3.2 with `@astrojs/node` 11.1.5 (standalone), SQLite through `node:sqlite`,
+local storage, `safeMedia` with a private directory outside the uploads and public directories, Astro
+sessions in the data directory, Sharp 0.35.4 (libvips 8.18.6). One Node 22.16.0 process from the
+official Linux x64 build, on a 4 vCPU AMD EPYC VPS with 8 GB of memory running Debian 13 (glibc 2.41).
+The site was installed and built in a Debian 12 container and run on the host; Sharp's prebuilt
+binaries loaded there. The host reports this profile as
+`{ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' }`, the same as the
+Docker run below. The service had these properties:
+
+- Caps: `MemoryMax=3G`, `MemorySwapMax=0`, `CPUQuota=200%`, and `OOMPolicy=continue` (see the memory
+  check below).
+- Sandbox: `ProtectSystem=strict` with `ReadWritePaths=` the data directory only (the site's code is
+  read-only to it), `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices`, `ProtectHome`,
+  `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
+  `ProtectClock`, `ProtectHostname`, `ProtectProc=invisible`, `RestrictSUIDSGID`, `RestrictRealtime`,
+  `RestrictNamespaces`, `LockPersonality`, `SystemCallArchitectures=native`, an empty
+  `CapabilityBoundingSet`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` (without
+  netlink, `os.networkInterfaces()` fails and requests error), `IPAddressDeny=any` with
+  `IPAddressAllow=localhost`, and `UMask=0077`. `MemoryDenyWriteExecute` cannot be used: V8 needs
+  writable executable memory.
+
+**What the run checks.** Every image is generated by Sharp, and the admin and editor sign in with
+software passkeys made for the run.
 
 - With no profile allowed, the plugin reports the host's profile and stays read-only; apply and bulk
   runs refuse and change nothing.
 - With the reported profile allowed: a measured scan of 11 images; a sample that changes no row or
   file; apply of one image, after which its unchanged URL serves the new bytes, its ID, storage key,
   alt text, caption and focal point are kept, and the host's operation is fenced on the baseline
-  revision; the original is in the private store and none of nine URL probes (its key, encoded and
+  revision; the original is in the private store and none of 13 URL probes (its key, encoded and
   traversal paths, revision keys, query parameters, the transformed endpoint) serves it; restore
   serves the original byte for byte; a preset change re-optimizes from the privately read original
   with a single fenced replace and no restore; a bulk apply of three images and a batch restore,
@@ -251,26 +276,56 @@ passkeys made for the run:
   bulk-reconcile and scan-start routes, each without a session (401), as an editor without
   `plugins:manage` (403), as the admin without the `X-EmDash-Request` header (403), as the admin from
   another origin without it (403) and with an invalid bearer token (401). Every one of the 40 requests
-  left the database rows and files above unchanged.
+  left the database rows and files unchanged.
 - Lifecycle: a run paused before an upgrade (the plugin rebuilt under another version) is still paused
   after it and through a scheduler interval, with its images untouched, and completes on resume;
-  scan results, settings and run records are kept. Disabling the plugin stops an active run (its
-  scheduled task is disabled, its routes answer 404, nothing changes for a scheduler interval) while
+  scan results, settings and run records are kept. Disabling the plugin stops an active run while
   every image keeps serving; enabling it again completes the run. The sandboxed edition registered
   instead has no apply or bulk routes (404) and its report offers neither. With the plugin removed
-  from the site, every image serves its active bytes; the host's recovery entry point then restores
-  an optimized image byte for byte with the site stopped. Registered again, the plugin finds its
-  data, does not claim the host's restore (`nothing-to-restore`), and restores another image it
-  optimized.
+  from the site, every image serves its active bytes; the host's recovery entry point, run as the
+  site user with the site stopped, then restores an optimized image byte for byte. Registered again,
+  the plugin finds its data, does not claim the host's restore (`nothing-to-restore`), and restores
+  another image it optimized.
 
-The script was checked by breaking it: sending the CSRF header for the caller that should lack it,
-ignoring the response status so that only the state comparison could catch an apply, and not pausing
-the run before the upgrade each made the run fail.
+And, for this profile:
+
+- **The caps are in effect.** On each of the eight starts, the unit's cgroup has `memory.max`
+  3221225472, `memory.swap.max` 0 and `cpu.max` `200000 100000`, and the one site server process runs
+  in that cgroup, as the site user, as the unit's main process.
+- **The processor's workers run inside the unit.** The site's processes are found from `/proc`, not
+  from the unit: during the measured scan all 11 workers, and during the scan below all 15, were in
+  the unit's cgroup.
+- **No out-of-memory kill under the caps.** A measured scan of images near the processor limits
+  (23.9 MP JPEG of 10.4 MiB, 12 MP lossy WebP, 12 MP lossless WebP of 14.8 MiB), with a sample of the
+  largest started beside it, ran with the shipped [processor limits](#processor-limits). All three
+  were measured. The sample was refused as busy: the pixel budget did not admit it beside the
+  scan's 24 MP encode, so two encodes never ran at once in this run. The unit peaked at 705 MiB of its
+  3 GiB, and `memory.events` showed no `oom` or `oom_kill`. The same was read from every unit just
+  before it stopped: none of the eight reached its limit.
+- **Site data belongs to the site user alone.** After the uploads, after the first apply and at the
+  end of the run, every entry under the data directory is owned by the site user; the data, uploads,
+  private, staging and sessions directories are 0700, the database 0600, and no file (the
+  database's `-wal` and `-shm` included) has group or other access. As `nobody`, reading the
+  database, the directories, a retained original or an uploaded file each failed with `EACCES`.
+- **One process per site.** While the site runs, the runner refuses to start it again, and
+  `systemd-run` refuses a second unit of the same name; the site keeps its single process.
+
+The new checks were confirmed by breaking each one on purpose, and each run then failed:
+- **No memory cap:** without `MemoryMax`, the unit showed `memory.max` `max`.
+- **Private directory at 0755:** the mode check failed. With every data directory at 0755 and the
+  mode check removed, the read as `nobody` succeeded and failed the run.
+- **Site server moved out of the unit's cgroup:** the server check failed. With that check removed,
+  the workers check found the server and its workers outside the unit.
+- **Cap lowered to 600 MiB:** the kernel killed a worker on each of three ticks. Under the default
+  `OOMPolicy=stop`, systemd stopped the whole site at the first kill, which is why the service uses
+  `OOMPolicy=continue`. With it, the site kept serving and the `memory.events` check failed the run.
+- **Runner's one-process guard removed:** the second start reached `systemd-run`, which refused the
+  duplicate unit name, and the check, which expects the runner's own refusal, failed.
 
 **Delivery freshness.** After each apply, restore and re-optimization, the first request to the
 image's URL (`/_emdash/api/media/file/<key>`) and to its transformed URL (`/_image?href=...&w=320&f=png`)
-already served the new content: no stale response, the direct URL within 16 ms and the transformed
-one within 28 ms of the route answering (the transform included). Both answer
+already served the new content: no stale response, the direct URL within 11 ms and the transformed
+one within 25 ms of the route answering (the transform included). Both answer
 `Cache-Control: public, max-age=0, must-revalidate` without an ETag. That bounds the site itself only:
 a CDN or proxy in front that ignores these headers, and pages prerendered at build time, keep the old
 image until they are purged or rebuilt, which this run does not cover.
@@ -280,20 +335,41 @@ the uploaded file, at its storage key, as the image's baseline revision and keep
 copies it to the private store. The file route resolves the key to the active revision, so the
 original is not served through EmDash, but anything that serves the uploads directory directly (a web
 server or proxy mounting it, a public bucket) would serve originals. Serve media only through the
-site.
+site; on this profile the data directory's mode 0700 also keeps a proxy running as another user from
+reading it.
 
-To repeat the run (in a container like the one above, from a checkout carrying the host patches):
+Not covered: a reverse proxy in front (the run talks to 127.0.0.1 directly), a persistent unit with
+`Restart=` and boot ordering (the run uses transient units), several sites on one host, real users or
+content.
+
+To repeat the run, as root on the host, from a checkout carrying the host patches, with the site
+user created (`useradd --system --no-create-home --shell /usr/sbin/nologin <user>`):
 
 ```sh
 pnpm host:checkout && pnpm host:pilot
 (cd .upstream/emdash-pilot && npx pnpm@11.9.0 install --frozen-lockfile --ignore-scripts)
 node packages/image-optimizer/qualification/qualify-site.mjs \
+  --runner systemd --site-user <user> --work <directory the user can traverse> \
   --pilot .upstream/emdash-pilot --patch-manifest host/emdash/patches/patches.json
 ```
 
-It takes about nine minutes, most of it waiting for the per-minute scheduler, works in
-`.qualification-runs/image-optimizer-site` (`--work` to change it) and leaves the site there,
-stopped. It writes `qualification/site-latest.json` only when every check passed.
+`--build-wrapper <executable>` runs the build steps (git, pnpm, npm, tar, astro) elsewhere, for
+example in a container, as `<executable> <directory> env <NAME=VALUE...> <command...>`. The build
+environment must see the work directory at the same real path, since Astro records it in the build
+(a symlink does not do). `--memory-max` and `--cpu-quota` change the caps. It takes about ten minutes,
+leaves the site stopped and its unit gone, and writes `qualification/site-host-latest.json` only when
+every check passed.
+
+#### Earlier run on a Docker profile
+
+Before the runtime was decided, the same checklist ran with the site as a child process in a Docker
+container capped at 2 CPUs and 3 GiB (memory and swap) on the same VPS, without the service sandbox
+or a separate site user. It passed and is kept as additional evidence in
+[`qualification/site-latest.json`](qualification/site-latest.json) (the default `--runner process`):
+first responses were fresh within 16 ms direct and 28 ms transformed. That run also confirmed the
+script by breaking it: sending the CSRF header for the caller that should lack it, ignoring the
+response status so that only the state comparison could catch an apply, and not pausing the run
+before the upgrade each made the run fail.
 
 #### Installing on this profile (unsupported, for testing)
 
@@ -301,35 +377,126 @@ stopped. It writes `qualification/site-latest.json` only when every check passed
    patches), install the pilot as above, then `npx pnpm@11.9.0 build` and
    `npx pnpm@11.9.0 pack` in `.upstream/emdash-pilot/packages/core`.
 2. In the site, install that `emdash` tarball, the other EmDash packages it names at their pinned
-   versions, Sharp 0.35.4, and this package (`pnpm build` here, then `npm pack`).
-3. Configure the site as `qualification/site/astro.config.mjs` does: `siteUrl`, SQLite, local storage
-   and `safeMedia: { privateDirectory }` with the private directory outside both the uploads and the
-   public directories. Run one site process.
+   versions, Sharp 0.35.4, and this package (`pnpm build` here, then `npm pack`). Build the site
+   (`astro build`) where it will run, or at the same real path.
+3. Configure the site as `qualification/site/astro.config.mjs` does: `siteUrl`, SQLite, local storage,
+   `safeMedia: { privateDirectory }` with the private directory outside both the uploads and the
+   public directories, and Astro's session driver pointed into the data directory
+   (`sessionDrivers.fsLite({ base })`), since the code directory is read-only to the service.
 4. Register `imageOptimizerPlugin({ qualifiedProfiles: [<the profile the report names>],
-   stagingDirectory })`, with the staging directory on the same persistent volume as the data.
-   Without `qualifiedProfiles` the plugin stays read-only.
+   stagingDirectory })`, with the staging directory in the data directory. Without
+   `qualifiedProfiles` the plugin stays read-only.
+5. Create the site user and its data directory, owned by it and closed to everyone else:
+
+   ```sh
+   useradd --system --no-create-home --shell /usr/sbin/nologin site-example
+   install -d -m 0700 -o site-example -g site-example /srv/site-example/data
+   for d in uploads private staging sessions; do
+     install -d -m 0700 -o site-example -g site-example "/srv/site-example/data/$d"
+   done
+   ```
+
+   The code (`/srv/site-example/app` here) stays owned by root and readable by the site user.
+6. Run it as one service. A minimal definition, with the properties the run used (`Restart=` and the
+   `[Install]` section were not part of the run, which used transient units):
+
+   ```ini
+   # /etc/systemd/system/site-example.service
+   [Unit]
+   Description=EmDash site (example)
+   After=network.target
+
+   [Service]
+   User=site-example
+   Group=site-example
+   WorkingDirectory=/srv/site-example/app
+   Environment=HOST=127.0.0.1 PORT=4321 NODE_ENV=production
+   ExecStart=/opt/node-v22.16.0/bin/node dist/server/entry.mjs
+   Restart=on-failure
+   TimeoutStopSec=30
+
+   MemoryMax=3G
+   MemorySwapMax=0
+   CPUQuota=200%
+   OOMPolicy=continue
+
+   UMask=0077
+   ProtectSystem=strict
+   ReadWritePaths=/srv/site-example/data
+   NoNewPrivileges=yes
+   PrivateTmp=yes
+   PrivateDevices=yes
+   ProtectHome=yes
+   ProtectKernelTunables=yes
+   ProtectKernelModules=yes
+   ProtectKernelLogs=yes
+   ProtectControlGroups=yes
+   ProtectClock=yes
+   ProtectHostname=yes
+   ProtectProc=invisible
+   RestrictSUIDSGID=yes
+   RestrictRealtime=yes
+   RestrictNamespaces=yes
+   LockPersonality=yes
+   SystemCallArchitectures=native
+   CapabilityBoundingSet=
+   RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+   IPAddressDeny=any
+   IPAddressAllow=localhost
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   `IPAddressDeny=any` also blocks outbound connections from the site; drop it if the site needs any.
+   The processor limits were measured for 3 GiB and two CPUs; with other caps, measure again.
+7. **Reverse proxy:** pass every request to `127.0.0.1:<port>` and nothing else. Never serve the
+   uploads directory (or any part of the data directory) from the proxy, with `root`, `alias` or a
+   static mount: it holds the originals of optimized images at their public keys (see above). With
+   nginx, a single `location / { proxy_pass http://127.0.0.1:4321; }` with the usual `Host` and
+   forwarding headers; no `location` that points at the file system. A proxy cache must honour
+   `Cache-Control: max-age=0, must-revalidate`, or be purged after apply and restore. Not exercised
+   in the run.
+8. **One process per site.** The safe-media locks are held in the process, so two processes on the
+   same data can interleave replacements and restores. Do not run the site under a cluster or process
+   manager that forks several workers, do not start a second service (or a copy under another name)
+   on the same data directory, and run anything else that opens the data, such as the recovery entry
+   point below, only while the service is stopped. systemd refuses a second unit of the same name,
+   but nothing stops a second unit under another name; that is the operator's responsibility.
 
 #### Backup
 
 The database, the uploads directory and the private directory are one unit: the database names
 revisions and originals by storage key and digest, and the files are only meaningful with it. Back
-them up together, with the site stopped or at least with no apply, restore or run in progress, and
-restore them together. A database newer than its private directory refers to originals that are not
-there (restore then fails with a missing original); an older one loses the record of replacements.
-Copy SQLite with its `-wal` and `-shm` files, or with `sqlite3 .backup`. The staging directory holds
-only output waiting for the host; with nothing in progress it is empty (the run checks this after its
-bulk runs). Backing up with work in progress has not been exercised.
+them up together and restore them together. On this profile, that is the whole data directory:
+
+```sh
+systemctl stop site-example
+tar --numeric-owner -cpf /backup/site-example-data.tar -C /srv/site-example data
+systemctl start site-example
+```
+
+and to restore, with the service stopped, replace `/srv/site-example/data` with the archive's
+`data` (`tar --numeric-owner -xpf ...`), keep it owned by the site user with the modes above, and
+start the service. Keep the archive as private as the data directory: it contains the originals.
+A database newer than its private directory refers to originals that are not there (restore then
+fails with a missing original); an older one loses the record of replacements. If the service cannot
+be stopped, copy SQLite with `sqlite3 .backup` and the files with no apply, restore or run in
+progress; backing up with work in progress has not been exercised. The staging directory holds only
+output waiting for the host; with nothing in progress it is empty (the run checks this after its bulk
+runs). The backup and restore commands above were not part of the run.
 
 #### Rollback
 
 1. **Stop changes:** disable the plugin in the admin. Runs stop between images, scheduled tasks are
    disabled, and every image keeps serving its active file.
-2. **Remove the plugin:** take it out of `plugins` in the site configuration, rebuild and restart.
-   Images keep serving the files they had; the plugin's records stay in the database and are found
-   again if it is registered later.
-3. **Put originals back without the plugin:** with the site stopped, restore each optimized image
-   with the host's recovery entry point (`emdash/media/safe-recovery`, see the host patches' README),
-   run from the site directory:
+2. **Remove the plugin:** take it out of `plugins` in the site configuration, rebuild and restart the
+   service. Images keep serving the files they had; the plugin's records stay in the database and are
+   found again if it is registered later.
+3. **Put originals back without the plugin:** stop the service and restore each optimized image with
+   the host's recovery entry point (`emdash/media/safe-recovery`, see the host patches' README), run
+   from the site directory **as the site user**, so that the files it writes belong to it. A script
+   such as `recover.mjs`:
 
    ```js
    import { openSafeMediaRecovery } from 'emdash/media/safe-recovery';
@@ -340,8 +507,19 @@ bulk runs). Backing up with work in progress has not been exercised.
    await recovery.close();
    ```
 
-   Then start the site. The run above did this for one image; a site needs it for every image the
-   plugin optimized.
+   run with the service's user and sandbox:
+
+   ```sh
+   systemctl stop site-example
+   systemd-run --wait --pipe --collect --uid site-example --gid site-example \
+     -p UMask=0077 -p ProtectSystem=strict -p ReadWritePaths=/srv/site-example/data \
+     --working-directory=/srv/site-example/app /opt/node-v22.16.0/bin/node recover.mjs
+   systemctl start site-example
+   ```
+
+   Run as root instead, it would leave files the site user cannot read. The run did this for one
+   image, in a unit with the site's caps and sandbox; a site needs it for every image the plugin
+   optimized.
 
 Going back to an EmDash without the host patches, or without `safeMedia`, has not been exercised. Do
 not do it while any image has a replaced revision: restore every image first, since the stock file
@@ -520,7 +698,7 @@ hook and route, because neither the Node runner nor the test hosts enforce it.
   are not affected.
 - The report has no link to each image in the media library: Block Kit links can target content,
   plugin pages and settings, but not media items.
-- Tested in the EmDash plugin test hosts, and the native edition on one disposable Node site of the
+- Tested in the EmDash plugin test hosts, and the native edition on disposable Node sites of the
   patched host (no real users or content), not on Cloudflare; the report has not been tried with users. The 50 ms CPU limit per invocation on Cloudflare has not been
   measured.
 
