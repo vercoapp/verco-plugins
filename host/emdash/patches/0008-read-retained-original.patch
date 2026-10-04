@@ -1,0 +1,896 @@
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 01a637c59a2eabca9bd7da1ed8d3e3492811d196..07b351ef7d6f5fbb5c018f81f218403ec6c7386f 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -370,6 +370,8 @@ export type {
+ 	SafeMediaAccess,
+ 	SafeMediaHostProfile,
+ 	SafeMediaOperationStatus,
++	SafeMediaReadOriginalOptions,
++	SafeMediaReadOriginalResult,
+ 	SafeMediaReplaceRequest,
+ 	SafeMediaRestorableOriginal,
+ 	SafeMediaRestoreRequest,
+diff --git a/packages/core/src/media/safe/plugin-access.ts b/packages/core/src/media/safe/plugin-access.ts
+index 74103e7e14cb1b78a4ef29b76ed7853cfe288cc6..d23e3be5f107409668b17f99d7d965f9f2750caa 100644
+--- a/packages/core/src/media/safe/plugin-access.ts
++++ b/packages/core/src/media/safe/plugin-access.ts
+@@ -2,17 +2,22 @@
+  * Safe media operations for native plugins (`ctx.media.safe`).
+  *
+  * A narrow surface over the replacement service: support discovery, the active
+- * revision, same-geometry replacement, restore of retained originals and
+- * operation status. Operations are attributed to the plugin, and a plugin can
++ * revision, same-geometry replacement, restore of retained originals, a
++ * private read of a retained original and operation status. Operations are attributed to the plugin, and a plugin can
+  * neither read nor reuse another caller's operation records.
+  *
+  * Only types are imported from the service so this module stays free of
+  * Node-only dependencies.
+  */
+ 
++import {
++	DEFAULT_PLUGIN_MEDIA_READ_BYTES,
++	MAX_PLUGIN_MEDIA_READ_BYTES,
++} from "../../plugins/media.js";
+ import type {
+ 	MediaReplacementService,
+ 	PublishedReceipt,
++	ReadOriginalResult,
+ 	RejectedReceipt,
+ 	ReplaceResult,
+ 	RestorableOriginal,
+@@ -78,6 +83,15 @@ export interface SafeMediaOperationStatus {
+ 
+ export type SafeMediaResult = ReplaceResult;
+ export type SafeMediaRestorableOriginal = RestorableOriginal;
++export type SafeMediaReadOriginalResult = ReadOriginalResult;
++
++export interface SafeMediaReadOriginalOptions {
++	/**
++	 * Refuse an original larger than this many bytes without reading it. Defaults
++	 * to and may not exceed the limits of `ctx.media.readBytes`.
++	 */
++	maxBytes?: number;
++}
+ 
+ export interface SafeMediaAccess {
+ 	support(): Promise<SafeMediaSupport>;
+@@ -88,6 +102,16 @@ export interface SafeMediaAccess {
+ 	/** Publish a retained original of this media item against `expectedRevisionId`. */
+ 	restore(request: SafeMediaRestoreRequest): Promise<SafeMediaResult>;
+ 	listRestorableOriginals(mediaId: string): Promise<SafeMediaRestorableOriginal[]>;
++	/**
++	 * The bytes of an original retained for this media item (one listed by
++	 * `listRestorableOriginals`), verified against `sha256`. Read-only: the active
++	 * revision, records and storage are unchanged, and no URL or storage key is returned.
++	 */
++	readOriginal(
++		mediaId: string,
++		sha256: string,
++		options?: SafeMediaReadOriginalOptions,
++	): Promise<SafeMediaReadOriginalResult>;
+ 	/** Status and receipt of an operation this plugin started; null for unknown or foreign IDs. */
+ 	operation(mediaId: string, operationId: string): Promise<SafeMediaOperationStatus | null>;
+ }
+@@ -176,6 +200,23 @@ export function createSafeMediaPluginAccess(
+ 			return service.listRestorableOriginals(mediaId);
+ 		},
+ 
++		async readOriginal(mediaId, sha256, options) {
++			const maxBytes = options?.maxBytes ?? DEFAULT_PLUGIN_MEDIA_READ_BYTES;
++			if (
++				!Number.isSafeInteger(maxBytes) ||
++				maxBytes <= 0 ||
++				maxBytes > MAX_PLUGIN_MEDIA_READ_BYTES
++			) {
++				return {
++					ok: false,
++					code: "INVALID_REQUEST",
++					message: `maxBytes must be a positive integer no greater than ${MAX_PLUGIN_MEDIA_READ_BYTES}.`,
++					retryable: false,
++				};
++			}
++			return service.readOriginal(mediaId, sha256, maxBytes);
++		},
++
+ 		async operation(mediaId, operationId) {
+ 			const status = await service.getOperation(mediaId, operationId);
+ 			if (!status || status.createdBy !== owner) return null;
+diff --git a/packages/core/src/media/safe/private-originals.ts b/packages/core/src/media/safe/private-originals.ts
+index 32ba55f7a569a80289900b13bae4ee3146caf676..3c394065c478a1808091469ff698f7ad2e604583 100644
+--- a/packages/core/src/media/safe/private-originals.ts
++++ b/packages/core/src/media/safe/private-originals.ts
+@@ -13,6 +13,7 @@ import { isSha256Hex, MEDIA_ORIGINALS_PREFIX, originalStorageKey } from "./origi
+ export type PrivateOriginalErrorCode =
+ 	| "ORIGINAL_NOT_FOUND"
+ 	| "ORIGINAL_VERIFY_FAILED"
++	| "ORIGINAL_TOO_LARGE"
+ 	| "ORIGINAL_STORAGE_ERROR";
+ 
+ export class PrivateOriginalError extends Error {
+@@ -37,8 +38,11 @@ export interface RetainedOriginal {
+ export interface PrivateOriginalStore {
+ 	/** Durably retain `bytes` and return only once the stored copy matches its digest. */
+ 	retain(bytes: Uint8Array, mimeType: string): Promise<RetainedOriginal>;
+-	/** Read an original and verify it against `sha256`. */
+-	read(sha256: string): Promise<Uint8Array>;
++	/**
++	 * Read an original and verify it against `sha256`. With `maxBytes`, reading
++	 * stops once the object is longer, so a caller's limit also bounds memory.
++	 */
++	read(sha256: string, options?: { maxBytes?: number }): Promise<Uint8Array>;
+ 	exists(sha256: string): Promise<boolean>;
+ 	/** Every stored original object, recorded or not. Used by reconciliation only. */
+ 	list(): Promise<Array<{ sha256: string; lastModified: Date }>>;
+@@ -61,11 +65,47 @@ function isNotFound(error: unknown): boolean {
+ 	);
+ }
+ 
+-async function readAll(storage: Storage, key: string): Promise<Uint8Array | null> {
++async function readLimited(
++	body: ReadableStream<Uint8Array>,
++	maxBytes: number,
++): Promise<Uint8Array> {
++	const reader = body.getReader();
++	const chunks: Uint8Array[] = [];
++	let size = 0;
++	try {
++		while (true) {
++			const { done, value } = await reader.read();
++			if (done) break;
++			size += value.byteLength;
++			if (size > maxBytes) {
++				await reader.cancel().catch(() => undefined);
++				throw new PrivateOriginalError("ORIGINAL_TOO_LARGE", "The original exceeds the read limit");
++			}
++			chunks.push(value);
++		}
++	} finally {
++		reader.releaseLock();
++	}
++	const bytes = new Uint8Array(size);
++	let offset = 0;
++	for (const chunk of chunks) {
++		bytes.set(chunk, offset);
++		offset += chunk.byteLength;
++	}
++	return bytes;
++}
++
++async function readAll(
++	storage: Storage,
++	key: string,
++	maxBytes?: number,
++): Promise<Uint8Array | null> {
+ 	try {
+ 		const result = await storage.download(key);
++		if (maxBytes !== undefined) return await readLimited(result.body, maxBytes);
+ 		return new Uint8Array(await new Response(result.body).arrayBuffer());
+ 	} catch (error) {
++		if (error instanceof PrivateOriginalError) throw error;
+ 		if (isNotFound(error)) return null;
+ 		throw new PrivateOriginalError("ORIGINAL_STORAGE_ERROR", "Original storage could not be read", {
+ 			cause: error,
+@@ -104,8 +144,8 @@ export function createPrivateOriginalStore(storage: OriginalStorage): PrivateOri
+ 			return { sha256, storageKey, size: stored.byteLength, created: true };
+ 		},
+ 
+-		async read(sha256) {
+-			const bytes = await readAll(storage, originalStorageKey(sha256));
++		async read(sha256, options) {
++			const bytes = await readAll(storage, originalStorageKey(sha256), options?.maxBytes);
+ 			if (!bytes) throw new PrivateOriginalError("ORIGINAL_NOT_FOUND", "Original is not retained");
+ 			if ((await sha256Hex(bytes)) !== sha256) {
+ 				throw new PrivateOriginalError(
+diff --git a/packages/core/src/media/safe/replacement-service.ts b/packages/core/src/media/safe/replacement-service.ts
+index 6344785cb39a264cd62d4554b4611aa23c59e333..9a22d6df6438cc8305358e3eaac9b8058c39ae16 100644
+--- a/packages/core/src/media/safe/replacement-service.ts
++++ b/packages/core/src/media/safe/replacement-service.ts
+@@ -117,6 +117,34 @@ export interface RestorableOriginal {
+ 	retainedAt: string | null;
+ }
+ 
++export type ReadOriginalRejectionCode =
++	| "INVALID_REQUEST"
++	/** The media item does not exist (for example, it was deleted) or is not ready. */
++	| "MEDIA_UNAVAILABLE"
++	/** No original with this digest was retained for this media item. */
++	| "NO_ORIGINAL"
++	/** The recorded size exceeds the caller's limit; nothing was read. */
++	| "TOO_LARGE"
++	/** The original is recorded but its stored object is gone. */
++	| "ORIGINAL_MISSING"
++	/** The stored object does not match the recorded digest or size. */
++	| "ORIGINAL_CORRUPT"
++	/** The private storage could not be read; the same request may succeed later. */
++	| "ORIGINAL_UNREADABLE";
++
++/** The bytes of a retained original, verified against its digest. No storage location is included. */
++export interface ReadOriginal {
++	mediaId: string;
++	sha256: string;
++	mimeType: string;
++	size: number;
++	bytes: Uint8Array;
++}
++
++export type ReadOriginalResult =
++	| ({ ok: true } & ReadOriginal)
++	| { ok: false; code: ReadOriginalRejectionCode; message: string; retryable: boolean };
++
+ export interface PublishedReceipt {
+ 	status: "published";
+ 	operationId: string;
+@@ -194,6 +222,25 @@ const MESSAGES: Readonly<Record<string, string>> = {
+ 		"The operation was interrupted and ended by reconciliation without publishing; use a new operation ID.",
+ };
+ 
++const READ_ORIGINAL_MESSAGES: Readonly<Record<ReadOriginalRejectionCode, string>> = {
++	INVALID_REQUEST: "The request is not valid.",
++	MEDIA_UNAVAILABLE: "The media item does not exist or is not ready.",
++	NO_ORIGINAL: "No retained original of this media item matches the request.",
++	TOO_LARGE: "The original exceeds the read limit.",
++	ORIGINAL_MISSING: "The retained original is recorded but no longer stored.",
++	ORIGINAL_CORRUPT: "The stored original no longer matches its digest.",
++	ORIGINAL_UNREADABLE: "The private original storage could not be read; retry later.",
++};
++
++function readRefused(code: ReadOriginalRejectionCode): ReadOriginalResult {
++	return {
++		ok: false,
++		code,
++		message: READ_ORIGINAL_MESSAGES[code],
++		retryable: code === "ORIGINAL_UNREADABLE",
++	};
++}
++
+ const TRANSACTIONS_UNSUPPORTED_RE = /transactions are not supported/i;
+ 
+ async function readObject(storage: Storage, key: string): Promise<Uint8Array | null> {
+@@ -559,6 +606,67 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		return result;
+ 	}
+ 
++	async function isReady(mediaId: string): Promise<boolean> {
++		const media = await db
++			.selectFrom("media")
++			.select("status")
++			.where("id", "=", mediaId)
++			.executeTakeFirst();
++		return media?.status === "ready";
++	}
++
++	/**
++	 * Read-only: no lock, journal entry or record is written, and the active
++	 * revision is untouched. Only an original listed by `listRestorableOriginals`
++	 * for this media item is read, and only after its recorded size fits `maxBytes`.
++	 */
++	async function readOriginal(
++		mediaId: string,
++		sha256: string,
++		maxBytes: number,
++	): Promise<ReadOriginalResult> {
++		if (
++			typeof mediaId !== "string" ||
++			!mediaId ||
++			mediaId.length > 128 ||
++			typeof sha256 !== "string" ||
++			!isSha256Hex(sha256) ||
++			!Number.isSafeInteger(maxBytes) ||
++			maxBytes <= 0
++		) {
++			return readRefused("INVALID_REQUEST");
++		}
++		if (!(await isReady(mediaId))) return readRefused("MEDIA_UNAVAILABLE");
++		const retaining = await repo.listRetainingOperations(mediaId);
++		if (!retaining.some((operation) => operation.original_sha256 === sha256))
++			return readRefused("NO_ORIGINAL");
++		const record = await repo.getOriginal(sha256);
++		if (!record) return readRefused("NO_ORIGINAL");
++		if (record.size > maxBytes) return readRefused("TOO_LARGE");
++
++		let bytes: Uint8Array;
++		try {
++			// Bounded by the recorded size: a longer object is not this original.
++			bytes = await originals.read(sha256, { maxBytes: record.size });
++		} catch (error) {
++			if (!(error instanceof PrivateOriginalError)) throw error;
++			if (error.code === "ORIGINAL_NOT_FOUND") return readRefused("ORIGINAL_MISSING");
++			if (error.code === "ORIGINAL_STORAGE_ERROR") return readRefused("ORIGINAL_UNREADABLE");
++			return readRefused("ORIGINAL_CORRUPT");
++		}
++		if (bytes.byteLength !== record.size) return readRefused("ORIGINAL_CORRUPT");
++		// Media deleted while its original was read is refused as well.
++		if (!(await isReady(mediaId))) return readRefused("MEDIA_UNAVAILABLE");
++		return {
++			ok: true,
++			mediaId,
++			sha256,
++			mimeType: record.mime_type,
++			size: bytes.byteLength,
++			bytes,
++		};
++	}
++
+ 	async function restore(request: RestoreRequest): Promise<ReplaceResult> {
+ 		if (
+ 			!IDENTIFIER.test(request.operationId) ||
+@@ -886,6 +994,11 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		restore,
+ 		/** Originals retained for a media item, newest first, as `restore` accepts them. */
+ 		listRestorableOriginals,
++		/**
++		 * The verified bytes of an original retained for this media item, if its
++		 * recorded size is at most `maxBytes`. Writes nothing.
++		 */
++		readOriginal,
+ 		/**
+ 		 * Complete or roll back interrupted operations and remove objects no record
+ 		 * references. Safe to run at any time in the writing process; see
+diff --git a/packages/core/src/plugins/index.ts b/packages/core/src/plugins/index.ts
+index da3cbc4a5010bab5173c4c5311acf28e3766bfd1..89fd2a142ad42374239f25180038f39099d1f9d1 100644
+--- a/packages/core/src/plugins/index.ts
++++ b/packages/core/src/plugins/index.ts
+@@ -189,6 +189,8 @@ export type {
+ 	SafeMediaAccess,
+ 	SafeMediaHostProfile,
+ 	SafeMediaOperationStatus,
++	SafeMediaReadOriginalOptions,
++	SafeMediaReadOriginalResult,
+ 	SafeMediaReplaceRequest,
+ 	SafeMediaRestorableOriginal,
+ 	SafeMediaRestoreRequest,
+diff --git a/packages/core/src/plugins/native-capabilities.ts b/packages/core/src/plugins/native-capabilities.ts
+index 9cefa6d7304798f400fb2bc40a3819a8442ae2d1..0bf59e6162a1f92bdaef6115e2c90eb8574c811f 100644
+--- a/packages/core/src/plugins/native-capabilities.ts
++++ b/packages/core/src/plugins/native-capabilities.ts
+@@ -10,7 +10,8 @@
+ 
+ /**
+  * `media:bytes:replace` grants `ctx.media.safe` on hosts with `safeMedia`:
+- * revision-fenced, same-geometry replacement and restore of retained originals.
++ * revision-fenced, same-geometry replacement, restore of retained originals and
++ * private reads of their bytes.
+  */
+ export const NATIVE_PLUGIN_CAPABILITIES = ["media:bytes:replace"] as const;
+ 
+diff --git a/packages/core/src/plugins/types.ts b/packages/core/src/plugins/types.ts
+index 659048a12aeb4f4dc8e978effe6f3b0e3800ee3c..8629b8555bdc125de0ccca559d10c77c088c9e73 100644
+--- a/packages/core/src/plugins/types.ts
++++ b/packages/core/src/plugins/types.ts
+@@ -58,6 +58,8 @@ export type {
+ 	SafeMediaAccess,
+ 	SafeMediaHostProfile,
+ 	SafeMediaOperationStatus,
++	SafeMediaReadOriginalOptions,
++	SafeMediaReadOriginalResult,
+ 	SafeMediaReplaceRequest,
+ 	SafeMediaRestorableOriginal,
+ 	SafeMediaRestoreRequest,
+@@ -911,8 +913,9 @@ export interface MediaAccess {
+ 	/** Change only alt text, caption, or the complete focal-point pair. */
+ 	updateMetadata?(id: string, patch: MediaMetadataPatch): Promise<MediaItem>;
+ 	/**
+-	 * Revision-fenced replacement and restore. Present only for native plugins
+-	 * that declare `media:bytes:replace`, on hosts with `safeMedia` configured.
++	 * Revision-fenced replacement and restore, and private reads of retained
++	 * originals. Present only for native plugins that declare
++	 * `media:bytes:replace`, on hosts with `safeMedia` configured.
+ 	 */
+ 	safe?: SafeMediaAccess;
+ 
+diff --git a/packages/core/tests/integration/runtime/plugin-safe-media.test.ts b/packages/core/tests/integration/runtime/plugin-safe-media.test.ts
+index 6166b449f4376b441eaba855f04d6a4dc3261c58..fcab6196e47d4003b79fe0eadfa006989a063cc7 100644
+--- a/packages/core/tests/integration/runtime/plugin-safe-media.test.ts
++++ b/packages/core/tests/integration/runtime/plugin-safe-media.test.ts
+@@ -26,7 +26,12 @@ const probe = {
+ 		const safe = ctx.media?.safe;
+ 		if (!safe) return { access: false };
+ 		const { mediaId } = ctx.input as { mediaId: string };
+-		return { access: true, support: await safe.support(), revision: await safe.revision(mediaId) };
++		return {
++			access: true,
++			support: await safe.support(),
++			revision: await safe.revision(mediaId),
++			original: await safe.readOriginal(mediaId, "0".repeat(64)),
++		};
+ 	},
+ };
+ 
+@@ -139,6 +144,7 @@ describe("EmDashRuntime safe-media access for plugin routes", () => {
+ 				geometry: "unchanged",
+ 			},
+ 			revision: { mediaId, mimeType: "image/png", width: 2, height: 2 },
++			original: { ok: false, code: "NO_ORIGINAL" },
+ 		});
+ 		await expect(call("native-reader", mediaId)).resolves.toEqual({ access: false });
+ 		await expect(call("sandboxed-reader", mediaId)).resolves.toEqual({ access: false });
+diff --git a/packages/core/tests/unit/media/safe/read-original.test.ts b/packages/core/tests/unit/media/safe/read-original.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d22405e7a26616d75a37b5bb44d0f5e6389c792a
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/read-original.test.ts
+@@ -0,0 +1,482 @@
++/**
++ * `ctx.media.safe.readOriginal`: a native plugin reads the verified bytes of an
++ * original retained for a media item without publishing it, and nothing else
++ * can, or can read anything else through it.
++ */
++
++import { createHash } from "node:crypto";
++import {
++	appendFile,
++	mkdir,
++	mkdtemp,
++	readdir,
++	readFile,
++	rm,
++	stat,
++	writeFile,
++} from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Kysely, SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { runMigrations } from "../../../../src/database/migrations/runner.js";
++import { MediaRepository } from "../../../../src/database/repositories/media.js";
++import type { Database } from "../../../../src/database/types.js";
++import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
++import type { SafeMediaPluginHost } from "../../../../src/media/safe/plugin-access.js";
++import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
++import type { PrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { createMediaReplacementService } from "../../../../src/media/safe/replacement-service.js";
++import { createOutputValidator } from "../../../../src/media/safe/validate-output.js";
++import { adaptSandboxEntry } from "../../../../src/plugins/adapt-sandbox-entry.js";
++import { PluginContextFactory } from "../../../../src/plugins/context.js";
++import { definePlugin } from "../../../../src/plugins/define-plugin.js";
++import {
++	DEFAULT_PLUGIN_MEDIA_READ_BYTES,
++	MAX_PLUGIN_MEDIA_READ_BYTES,
++} from "../../../../src/plugins/media.js";
++import type { PluginContext, SafeMediaAccess } from "../../../../src/plugins/types.js";
++import { LocalStorage } from "../../../../src/storage/local.js";
++import type { Storage } from "../../../../src/storage/types.js";
++import { computeContentHash } from "../../../../src/utils/hash.js";
++import { inProcessDecoder, noisy, solid } from "./output-fixtures.js";
++
++const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
++const SUPPORT: SafeMediaPluginHost["support"] = {
++	protocol: 1,
++	profile: { runtime: "node", database: "sqlite", storage: "local", locks: "in-process" },
++	formats: ["jpeg", "png", "webp"],
++	geometry: "unchanged",
++	limits: { maxBytes: 1024 * 1024, maxPixels: 1_000_000 },
++};
++
++describe("native safe-media readOriginal", () => {
++	let root: string;
++	let db: Kysely<Database>;
++	let active: LocalStorage;
++	let host: SafeMediaPluginHost;
++	/** Calls to the private original store's `read`, and whether its storage fails. */
++	let storeReads: number;
++	let privateStorageFails: boolean;
++	/** Bytes delivered by private storage downloads. */
++	let privateBytesRead: number;
++	let first: { mediaId: string; original: Uint8Array; optimized: Uint8Array };
++	let second: { mediaId: string; original: Uint8Array; optimized: Uint8Array };
++
++	const native = (capabilities: Parameters<typeof definePlugin>[0]["capabilities"]) =>
++		definePlugin({ id: "native-optimizer", version: "1.0.0", capabilities });
++	const factory = (withSafeMedia = true) =>
++		new PluginContextFactory({ db, storage: active, ...(withSafeMedia && { safeMedia: host }) });
++	const safeAccess = (): SafeMediaAccess =>
++		factory().createContext(native(["media:bytes:replace"])).media!.safe!;
++	const originalPath = (digest: string) => join(root, "private", "media-originals", digest);
++
++	async function files(directory: string): Promise<Record<string, string>> {
++		const result: Record<string, string> = {};
++		const entries = await readdir(directory, { recursive: true }).catch((): string[] => []);
++		for (const entry of entries.toSorted()) {
++			const full = join(directory, entry);
++			const info = await stat(full);
++			if (info.isFile())
++				result[entry] = `${sha(await readFile(full))}:${info.size}:${info.mtimeMs}`;
++		}
++		return result;
++	}
++
++	/** Every record and every stored object, including modification times. */
++	const snapshot = async () => ({
++		media: await db.selectFrom("media").selectAll().orderBy("id").execute(),
++		revisions: await db.selectFrom("_emdash_media_revisions").selectAll().orderBy("id").execute(),
++		originals: await db
++			.selectFrom("_emdash_media_originals")
++			.selectAll()
++			.orderBy("sha256")
++			.execute(),
++		operations: await db
++			.selectFrom("_emdash_media_operations")
++			.selectAll()
++			.orderBy("operation_id")
++			.execute(),
++		uploads: await files(join(root, "uploads")),
++		private: await files(join(root, "private")),
++	});
++
++	async function createMedia(key: string, bytes: Uint8Array) {
++		await active.upload({ key, body: bytes, contentType: "image/png" });
++		const media = await new MediaRepository(db).create({
++			filename: key,
++			mimeType: "image/png",
++			size: bytes.byteLength,
++			width: 64,
++			height: 48,
++			storageKey: key,
++			contentHash: await computeContentHash(bytes),
++			status: "ready",
++		});
++		return media.id;
++	}
++
++	/** A media item whose original was retained by a plugin replacement. */
++	async function optimizedMedia(key: string, original: Uint8Array, color: string) {
++		const optimized = new Uint8Array(await solid(64, 48, color).png().toBuffer());
++		const mediaId = await createMedia(key, original);
++		const safe = safeAccess();
++		const baseline = (await safe.revision(mediaId))!;
++		const replaced = await safe.replace({
++			mediaId,
++			operationId: `optimize-${key}`,
++			expectedRevisionId: baseline.revisionId,
++			bytes: optimized,
++		});
++		expect(replaced.ok).toBe(true);
++		return { mediaId, original, optimized };
++	}
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-read-original-"));
++		await mkdir(join(root, "uploads"), { recursive: true });
++		db = new Kysely<Database>({
++			dialect: new SqliteDialect({ database: openNodeSqliteDatabase(join(root, "site.db")) }),
++		});
++		await runMigrations(db);
++		active = new LocalStorage({ directory: join(root, "uploads"), baseUrl: "/media" });
++		storeReads = 0;
++		privateStorageFails = false;
++		privateBytesRead = 0;
++		const local = createLocalPrivateStorage({
++			directory: join(root, "private"),
++			publicDirectories: [join(root, "uploads")],
++		});
++		const failing: Storage = Object.assign(Object.create(local) as Storage, {
++			download: async (key: string) => {
++				if (privateStorageFails) throw new Error("disk unavailable");
++				const result = await local.download(key);
++				const counter = new TransformStream<Uint8Array, Uint8Array>({
++					transform(chunk, controller) {
++						privateBytesRead += chunk.byteLength;
++						controller.enqueue(chunk);
++					},
++				});
++				return { ...result, body: result.body.pipeThrough(counter) };
++			},
++		});
++		const store = createPrivateOriginalStore(failing);
++		const counted: PrivateOriginalStore = {
++			...store,
++			read: (digest, options) => {
++				storeReads++;
++				return store.read(digest, options);
++			},
++		};
++		host = {
++			service: createMediaReplacementService({
++				db,
++				storage: active,
++				originals: counted,
++				validator: createOutputValidator({ decoder: inProcessDecoder }),
++			}),
++			support: SUPPORT,
++		};
++		first = await optimizedMedia("01HZREADFIRST.png", await noisy(64, 48, "png"), "#2060e0");
++		second = await optimizedMedia(
++			"01HZREADSECOND.png",
++			new Uint8Array(await solid(64, 48, "#40a040").png().toBuffer()),
++			"#e02060",
++		);
++		expect(sha(second.original)).not.toBe(sha(first.original));
++		storeReads = 0;
++	});
++
++	afterEach(async () => {
++		await db.destroy();
++		await rm(root, { recursive: true, force: true });
++	});
++
++	describe("a native plugin declaring media:bytes:replace", () => {
++		it("reads a retained original byte-exact without publishing or writing anything", async () => {
++			const safe = safeAccess();
++			const [listed] = await safe.listRestorableOriginals(first.mediaId);
++			expect(listed!.sha256).toBe(sha(first.original));
++			const before = await snapshot();
++
++			const result = await safe.readOriginal(first.mediaId, listed!.sha256, {
++				maxBytes: listed!.size,
++			});
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++			expect(Buffer.from(result.bytes).equals(Buffer.from(first.original))).toBe(true);
++			expect(sha(result.bytes)).toBe(sha(first.original));
++			// Exactly these fields: no URL, storage key or path for the original.
++			expect(Object.keys(result).toSorted()).toEqual(
++				["bytes", "mediaId", "mimeType", "ok", "sha256", "size"].toSorted(),
++			);
++			expect(result).toMatchObject({
++				mediaId: first.mediaId,
++				sha256: sha(first.original),
++				mimeType: "image/png",
++				size: first.original.byteLength,
++			});
++
++			// The active revision is still the optimized image, served as before.
++			expect((await safe.revision(first.mediaId))!.sha256).toBe(sha(first.optimized));
++			expect(await snapshot()).toEqual(before);
++
++			// The default limit applies when none is given.
++			const defaulted = await safe.readOriginal(first.mediaId, listed!.sha256);
++			expect(defaulted.ok && sha(defaulted.bytes)).toBe(sha(first.original));
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses an original retained for another media item", async () => {
++			const safe = safeAccess();
++			const before = await snapshot();
++			const foreign = await safe.readOriginal(first.mediaId, sha(second.original));
++			expect(foreign).toMatchObject({ ok: false, code: "NO_ORIGINAL", retryable: false });
++			expect(foreign).not.toHaveProperty("bytes");
++			expect(storeReads).toBe(0);
++			// The same digest is readable through its own media item.
++			const own = await safe.readOriginal(second.mediaId, sha(second.original));
++			expect(own.ok && sha(own.bytes)).toBe(sha(second.original));
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses unknown and malformed digests, including the active revision's", async () => {
++			const safe = safeAccess();
++			const before = await snapshot();
++			await expect(safe.readOriginal(first.mediaId, "a".repeat(64))).resolves.toMatchObject({
++				ok: false,
++				code: "NO_ORIGINAL",
++			});
++			// The active (optimized) bytes are a revision, not a retained original.
++			await expect(safe.readOriginal(first.mediaId, sha(first.optimized))).resolves.toMatchObject({
++				ok: false,
++				code: "NO_ORIGINAL",
++			});
++			for (const digest of ["", "A".repeat(64), "../media-originals/x", sha(first.original) + "0"])
++				await expect(safe.readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++					ok: false,
++					code: "INVALID_REQUEST",
++				});
++			await expect(
++				safe.readOriginal(undefined as never, sha(first.original)),
++			).resolves.toMatchObject({ ok: false, code: "INVALID_REQUEST" });
++			expect(storeReads).toBe(0);
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("does not create a baseline revision for media without one", async () => {
++			const unmanaged = await createMedia("01HZREADUNMANAGED.png", await noisy(64, 48, "png"));
++			const before = await snapshot();
++			await expect(
++				safeAccess().readOriginal(unmanaged, sha(first.original)),
++			).resolves.toMatchObject({ ok: false, code: "NO_ORIGINAL" });
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses deleted and unready media although the original is still retained", async () => {
++			const safe = safeAccess();
++			await new MediaRepository(db).delete(first.mediaId);
++			await db
++				.updateTable("media")
++				.set({ status: "pending" })
++				.where("id", "=", second.mediaId)
++				.execute();
++			const before = await snapshot();
++			expect(before.originals.map((row) => row.sha256)).toContain(sha(first.original));
++			await expect(safe.readOriginal(first.mediaId, sha(first.original))).resolves.toMatchObject({
++				ok: false,
++				code: "MEDIA_UNAVAILABLE",
++			});
++			await expect(safe.readOriginal(second.mediaId, sha(second.original))).resolves.toMatchObject({
++				ok: false,
++				code: "MEDIA_UNAVAILABLE",
++			});
++			expect(storeReads).toBe(0);
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses media deleted while its original was being read", async () => {
++			const reading: PrivateOriginalStore = createPrivateOriginalStore(
++				createLocalPrivateStorage({
++					directory: join(root, "private"),
++					publicDirectories: [join(root, "uploads")],
++				}),
++			);
++			const racing = createMediaReplacementService({
++				db,
++				storage: active,
++				originals: {
++					...reading,
++					read: async (digest, options) => {
++						const bytes = await reading.read(digest, options);
++						await new MediaRepository(db).delete(first.mediaId);
++						return bytes;
++					},
++				},
++				validator: createOutputValidator({ decoder: inProcessDecoder }),
++			});
++			await expect(
++				racing.readOriginal(first.mediaId, sha(first.original), DEFAULT_PLUGIN_MEDIA_READ_BYTES),
++			).resolves.toMatchObject({ ok: false, code: "MEDIA_UNAVAILABLE" });
++		});
++
++		it("refuses a missing, corrupt or extended stored original", async () => {
++			const safe = safeAccess();
++			const digest = sha(first.original);
++
++			await rm(originalPath(digest));
++			let before = await snapshot();
++			await expect(safe.readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++				ok: false,
++				code: "ORIGINAL_MISSING",
++				retryable: false,
++			});
++			expect(await snapshot()).toEqual(before);
++
++			const flipped = new Uint8Array(first.original);
++			flipped[0] = flipped.at(0)! ^ 0xff;
++			await writeFile(originalPath(digest), flipped);
++			before = await snapshot();
++			await expect(safe.readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++				ok: false,
++				code: "ORIGINAL_CORRUPT",
++			});
++			expect(await snapshot()).toEqual(before);
++
++			await writeFile(originalPath(digest), first.original);
++			// A much longer object is not read to its end.
++			await appendFile(originalPath(digest), new Uint8Array(8 * 1024 * 1024));
++			before = await snapshot();
++			privateBytesRead = 0;
++			await expect(safe.readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++				ok: false,
++				code: "ORIGINAL_CORRUPT",
++			});
++			expect(privateBytesRead).toBeLessThan(first.original.byteLength + 1024 * 1024);
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses an original whose record disagrees with its verified bytes", async () => {
++			const digest = sha(first.original);
++			await db
++				.updateTable("_emdash_media_originals")
++				.set({ size: first.original.byteLength + 1 })
++				.where("sha256", "=", digest)
++				.execute();
++			await expect(safeAccess().readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++				ok: false,
++				code: "ORIGINAL_CORRUPT",
++			});
++		});
++
++		it("reports unreadable private storage as retryable", async () => {
++			privateStorageFails = true;
++			const before = await snapshot();
++			await expect(
++				safeAccess().readOriginal(first.mediaId, sha(first.original)),
++			).resolves.toMatchObject({ ok: false, code: "ORIGINAL_UNREADABLE", retryable: true });
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses an original over the caller's limit without reading it", async () => {
++			const safe = safeAccess();
++			const digest = sha(first.original);
++			const size = first.original.byteLength;
++			const before = await snapshot();
++			await expect(
++				safe.readOriginal(first.mediaId, digest, { maxBytes: size - 1 }),
++			).resolves.toEqual({
++				ok: false,
++				code: "TOO_LARGE",
++				message: "The original exceeds the read limit.",
++				retryable: false,
++			});
++			expect(storeReads).toBe(0);
++			const exact = await safe.readOriginal(first.mediaId, digest, { maxBytes: size });
++			expect(exact.ok).toBe(true);
++			expect(storeReads).toBe(1);
++			expect(await snapshot()).toEqual(before);
++		});
++
++		it("refuses limits above the host's plugin read maximum and originals beyond it", async () => {
++			const safe = safeAccess();
++			const digest = sha(first.original);
++			for (const maxBytes of [MAX_PLUGIN_MEDIA_READ_BYTES + 1, 0, -1, 1.5, Number.NaN])
++				await expect(safe.readOriginal(first.mediaId, digest, { maxBytes })).resolves.toMatchObject(
++					{ ok: false, code: "INVALID_REQUEST" },
++				);
++			// Without a limit, the default of media.readBytes applies.
++			await db
++				.updateTable("_emdash_media_originals")
++				.set({ size: DEFAULT_PLUGIN_MEDIA_READ_BYTES + 1 })
++				.where("sha256", "=", digest)
++				.execute();
++			await expect(safe.readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++				ok: false,
++				code: "TOO_LARGE",
++			});
++			expect(storeReads).toBe(0);
++			// An explicit larger limit reads, and finds the record does not match the bytes.
++			await expect(
++				safe.readOriginal(first.mediaId, digest, { maxBytes: DEFAULT_PLUGIN_MEDIA_READ_BYTES + 1 }),
++			).resolves.toMatchObject({ ok: false, code: "ORIGINAL_CORRUPT" });
++			storeReads = 0;
++			// An original recorded beyond the maximum cannot be read with any accepted limit.
++			await db
++				.updateTable("_emdash_media_originals")
++				.set({ size: MAX_PLUGIN_MEDIA_READ_BYTES + 1 })
++				.where("sha256", "=", digest)
++				.execute();
++			await expect(
++				safe.readOriginal(first.mediaId, digest, { maxBytes: MAX_PLUGIN_MEDIA_READ_BYTES }),
++			).resolves.toMatchObject({ ok: false, code: "TOO_LARGE" });
++			await expect(safe.readOriginal(first.mediaId, digest)).resolves.toMatchObject({
++				ok: false,
++				code: "TOO_LARGE",
++			});
++			expect(storeReads).toBe(0);
++		});
++	});
++
++	describe("callers that must not receive it", () => {
++		const ALL_MEDIA = ["media:read", "media:write", "media:bytes:read", "media:metadata:write"];
++
++		async function expectNoRead(contexts: PluginContext[]) {
++			const before = await snapshot();
++			for (const context of contexts) {
++				expect(context.media?.safe).toBeUndefined();
++			}
++			expect(storeReads).toBe(0);
++			expect(await snapshot()).toEqual(before);
++		}
++
++		it("gives a native plugin without the capability no read", async () => {
++			await expectNoRead([
++				factory().createContext(native([])),
++				factory().createContext(native(["media:read", "media:write", "media:bytes:read"])),
++			]);
++		});
++
++		it("gives a native plugin no read on a host without safeMedia", async () => {
++			await expectNoRead([
++				factory(false).createContext(native(["media:bytes:replace"])),
++				factory(false).createContext(native(["media:bytes:replace", "media:bytes:read"])),
++			]);
++		});
++
++		it("gives an in-process sandboxed-format plugin no read, even one built with definePlugin", async () => {
++			const definition = native(["media:bytes:replace", ...ALL_MEDIA] as never);
++			const adapted = adaptSandboxEntry(definition as never, {
++				id: "sandboxed-optimizer",
++				version: "1.0.0",
++				entrypoint: "sandboxed-optimizer",
++				format: "standard",
++				capabilities: ALL_MEDIA,
++			});
++			await expectNoRead([factory().createContext(adapted)]);
++		});
++	});
++});
