@@ -1,0 +1,2454 @@
+diff --git a/packages/core/src/astro/routes/api/media/file/[...key].ts b/packages/core/src/astro/routes/api/media/file/[...key].ts
+index 179335c982d96b0ab1356d217cd66ab11ebbc1e7..fd8517aa16aabd87c8c6f349695af4b6e8bb602b 100644
+--- a/packages/core/src/astro/routes/api/media/file/[...key].ts
++++ b/packages/core/src/astro/routes/api/media/file/[...key].ts
+@@ -9,7 +9,7 @@ import type { APIRoute } from "astro";
+ import { apiError, handleError } from "#api/error.js";
+ import { IMMUTABLE_IMAGE_CACHE, MUTABLE_MEDIA_CACHE_CONTROL } from "#media/image-endpoint.js";
+ 
+-import { resolveActiveObjectKey } from "../../../../../media/safe/resolve-object.js";
++import { downloadActiveObject } from "../../../../../media/safe/resolve-object.js";
+ import { isRefusedStorageKey } from "../../../../../transfer/staging/keys.js";
+ 
+ export const prerender = false;
+@@ -77,7 +77,7 @@ export const GET: APIRoute = async ({ params, locals }) => {
+ 
+ 	try {
+ 		// A stable key keeps serving the media's active revision after a replacement.
+-		const result = await emdash.storage.download(await resolveActiveObjectKey(emdash.db, key));
++		const result = await downloadActiveObject(emdash.storage, emdash.db, key);
+ 
+ 		const headers: Record<string, string> = {
+ 			"Content-Type": result.contentType,
+diff --git a/packages/core/src/database/migrations/093_safe_media_public_cleanup.ts b/packages/core/src/database/migrations/093_safe_media_public_cleanup.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d1f1c0d9505d248e6a99065c5a3bb8d7d8d9071
+--- /dev/null
++++ b/packages/core/src/database/migrations/093_safe_media_public_cleanup.ts
+@@ -0,0 +1,38 @@
++import type { Kysely } from "kysely";
++
++import { columnExists } from "../dialect-helpers.js";
++
++/**
++ * Safe media: public storage cleanup after publication.
++ *
++ * `_emdash_media_operations.public_cleaned_at` is set once a published
++ * operation's public storage has been brought in line with it: the media item's
++ * stable key holds the active revision's bytes and the superseded revision
++ * object is gone. NULL on a published operation means that work is still owed,
++ * which includes every operation published before this column existed.
++ */
++export async function up(db: Kysely<unknown>): Promise<void> {
++	if (!(await columnExists(db, "_emdash_media_operations", "public_cleaned_at"))) {
++		await db.schema
++			.alterTable("_emdash_media_operations")
++			.addColumn("public_cleaned_at", "text")
++			.execute();
++	}
++
++	await db.schema
++		.createIndex("idx_media_operations_public_cleaned")
++		.ifNotExists()
++		.on("_emdash_media_operations")
++		.columns(["public_cleaned_at", "state"])
++		.execute();
++}
++
++export async function down(db: Kysely<unknown>): Promise<void> {
++	await db.schema.dropIndex("idx_media_operations_public_cleaned").ifExists().execute();
++	if (await columnExists(db, "_emdash_media_operations", "public_cleaned_at")) {
++		await db.schema
++			.alterTable("_emdash_media_operations")
++			.dropColumn("public_cleaned_at")
++			.execute();
++	}
++}
+diff --git a/packages/core/src/database/migrations/runner.ts b/packages/core/src/database/migrations/runner.ts
+index 64ae365ca5b0647bd6410a6dc0127d3f04290a90..c274d877a634b384b1c766c19e29e2bde4c8700b 100644
+--- a/packages/core/src/database/migrations/runner.ts
++++ b/packages/core/src/database/migrations/runner.ts
+@@ -100,6 +100,7 @@ import * as m089 from "./089_auto_seed_completion.js";
+ import * as m090 from "./090_redirect_enable_loop_guard.js";
+ import * as m091 from "./091_redirect_artifacts.js";
+ import * as m092 from "./092_safe_media_operations.js";
++import * as m093 from "./093_safe_media_public_cleanup.js";
+ 
+ const MIGRATIONS: Readonly<Record<string, Migration>> = Object.freeze({
+ 	"001_initial": m001,
+@@ -193,6 +194,7 @@ const MIGRATIONS: Readonly<Record<string, Migration>> = Object.freeze({
+ 	"090_redirect_enable_loop_guard": m090,
+ 	"091_redirect_artifacts": m091,
+ 	"092_safe_media_operations": m092,
++	"093_safe_media_public_cleanup": m093,
+ });
+ 
+ /** Ordered names from the statically registered migration set. */
+diff --git a/packages/core/src/database/repositories/media-operations.ts b/packages/core/src/database/repositories/media-operations.ts
+index 105beeb71ef16e2e7d9ea5400cf36003a6330acf..352af33ac156bbf58c44cc873c8adec33cd08bca 100644
+--- a/packages/core/src/database/repositories/media-operations.ts
++++ b/packages/core/src/database/repositories/media-operations.ts
+@@ -476,4 +476,78 @@ export class MediaOperationsRepository {
+ 		}
+ 		return false;
+ 	}
++
++	/** Whether any media item's active revision is stored at this object key. */
++	async isRevisionObjectActive(objectKey: string): Promise<boolean> {
++		const row = await this.db
++			.selectFrom("media")
++			.innerJoin("_emdash_media_revisions", "_emdash_media_revisions.id", "media.revision_id")
++			.select("media.id")
++			.where("_emdash_media_revisions.object_key", "=", objectKey)
++			.executeTakeFirst();
++		return row !== undefined;
++	}
++
++	// --- Public storage cleanup ---------------------------------------------
++
++	/** Published operations whose public storage has not been brought in line yet, oldest first. */
++	async listPendingPublicCleanups(limit = 100): Promise<MediaOperation[]> {
++		return this.db
++			.selectFrom("_emdash_media_operations")
++			.selectAll()
++			.where("public_cleaned_at", "is", null)
++			.where("state", "=", "published")
++			.orderBy("completed_at")
++			.orderBy("operation_id")
++			.limit(limit)
++			.execute();
++	}
++
++	async markPublicCleaned(mediaId: string, operationId: string): Promise<void> {
++		await this.db
++			.updateTable("_emdash_media_operations")
++			.set({ public_cleaned_at: new Date().toISOString() })
++			.where("media_id", "=", mediaId)
++			.where("operation_id", "=", operationId)
++			.where("state", "=", "published")
++			.where("public_cleaned_at", "is", null)
++			.execute();
++	}
++
++	/** A managed media item with its stable key and the object of its active revision. */
++	async getManagedMedia(mediaId: string): Promise<{
++		storageKey: string;
++		mimeType: string;
++		objectKey: string;
++		sha256: string | null;
++	} | null> {
++		const row = await this.db
++			.selectFrom("media")
++			.innerJoin("_emdash_media_revisions", "_emdash_media_revisions.id", "media.revision_id")
++			.select([
++				"media.storage_key",
++				"media.mime_type",
++				"_emdash_media_revisions.object_key",
++				"_emdash_media_revisions.sha256",
++			])
++			.where("media.id", "=", mediaId)
++			.executeTakeFirst();
++		if (!row) return null;
++		return {
++			storageKey: row.storage_key,
++			mimeType: row.mime_type,
++			objectKey: row.object_key,
++			sha256: row.sha256,
++		};
++	}
++
++	/** How many media rows use this stable storage key. */
++	async countMediaWithStorageKey(storageKey: string): Promise<number> {
++		const row = await this.db
++			.selectFrom("media")
++			.select((eb) => eb.fn.countAll<number>().as("count"))
++			.where("storage_key", "=", storageKey)
++			.executeTakeFirstOrThrow();
++		return Number(row.count);
++	}
+ }
+diff --git a/packages/core/src/database/types.ts b/packages/core/src/database/types.ts
+index 207cae51a5899835faca127b32086b9a74015a51..0ca0926518e22dbcedc6ee08a2a7c077b9de8f54 100644
+--- a/packages/core/src/database/types.ts
++++ b/packages/core/src/database/types.ts
+@@ -139,6 +139,8 @@ export interface MediaOperationTable {
+ 	created_at: Generated<string>;
+ 	updated_at: Generated<string>;
+ 	completed_at: string | null;
++	/** When the public storage was brought in line with this published operation; NULL while owed. */
++	public_cleaned_at: string | null;
+ }
+ 
+ export interface MediaFolderTable {
+diff --git a/packages/core/src/media/safe/public-local.ts b/packages/core/src/media/safe/public-local.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2af235954590491e19d0947ddb436476c6075037
+--- /dev/null
++++ b/packages/core/src/media/safe/public-local.ts
+@@ -0,0 +1,79 @@
++/**
++ * Atomic replacement of an object in the local public storage (Node only).
++ *
++ * The stable key of a media item is rewritten after a publication so that it
++ * holds the active revision's bytes. Whatever reads that file without going
++ * through the host (a file server on the storage directory, an earlier EmDash
++ * version) must see the previous or the new bytes in full, so the bytes are
++ * written to a temporary name, flushed and renamed into place.
++ */
++
++import * as fs from "node:fs/promises";
++import * as path from "node:path";
++
++import { EmDashStorageError } from "../../storage/types.js";
++import { MEDIA_REVISIONS_PREFIX } from "./revision-keys.js";
++
++export interface StableKeyWriter {
++	/** Replace the object at `key`; a concurrent reader sees the previous or the new bytes, never a mixture. */
++	write(key: string, bytes: Uint8Array): Promise<void>;
++	/** Remove temporary files of interrupted writes last modified before `before`; returns how many. */
++	removeTemporaryFiles(before: Date): Promise<number>;
++}
++
++const TEMPORARY_PREFIX = "stable-";
++const TEMPORARY_SUFFIX = ".tmp";
++
++export function createLocalStableKeyWriter(storageDirectory: string): StableKeyWriter {
++	const directory = path.resolve(storageDirectory);
++	// Inside the storage directory so the rename stays on one filesystem, and under a
++	// prefix the public route refuses.
++	const temporaryDirectory = path.join(directory, MEDIA_REVISIONS_PREFIX);
++
++	return {
++		async write(key, bytes) {
++			const target = path.resolve(directory, key);
++			if (!key || key.includes("\0") || !target.startsWith(directory + path.sep)) {
++				throw new EmDashStorageError("Invalid file path", "INVALID_PATH");
++			}
++			const temporary = path.join(
++				temporaryDirectory,
++				`${TEMPORARY_PREFIX}${crypto.randomUUID()}${TEMPORARY_SUFFIX}`,
++			);
++			try {
++				await fs.mkdir(temporaryDirectory, { recursive: true });
++				const handle = await fs.open(temporary, "wx");
++				try {
++					await handle.writeFile(bytes);
++					await handle.sync();
++				} finally {
++					await handle.close();
++				}
++				await fs.rename(temporary, target);
++				const parent = await fs.open(path.dirname(target), "r");
++				try {
++					await parent.sync();
++				} finally {
++					await parent.close();
++				}
++			} catch (error) {
++				await fs.rm(temporary, { force: true });
++				throw new EmDashStorageError(`Failed to replace file: ${key}`, "UPLOAD_FAILED", error);
++			}
++		},
++
++		async removeTemporaryFiles(before) {
++			let removed = 0;
++			for (const name of await fs.readdir(temporaryDirectory).catch((): string[] => [])) {
++				if (!name.startsWith(TEMPORARY_PREFIX) || !name.endsWith(TEMPORARY_SUFFIX)) continue;
++				const full = path.join(temporaryDirectory, name);
++				const stat = await fs.stat(full).catch(() => null);
++				if (stat?.isFile() && stat.mtime < before) {
++					await fs.rm(full, { force: true });
++					removed++;
++				}
++			}
++			return removed;
++		},
++	};
++}
+diff --git a/packages/core/src/media/safe/public-objects.ts b/packages/core/src/media/safe/public-objects.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2775683c3392f8be9568859aed4472f5feba85ba
+--- /dev/null
++++ b/packages/core/src/media/safe/public-objects.ts
+@@ -0,0 +1,163 @@
++/**
++ * Public storage after a publication.
++ *
++ * Publication moves the media row's pointer; the public storage is brought in
++ * line afterwards, in two repeatable steps:
++ *
++ * - the media item's stable key is rewritten with the active revision's bytes,
++ *   so a reader that bypasses the host (a file server on the storage directory,
++ *   an EmDash version without revisions) serves the active image, and
++ * - the revision object that was superseded is removed.
++ *
++ * Neither step removes or overwrites bytes until the same bytes are verified
++ * in the private original store and recorded there. Readers that go through
++ * the host are unaffected: they resolve the active revision's own object,
++ * which these steps never touch.
++ */
++
++import type { MediaOperationsRepository } from "../../database/repositories/media-operations.js";
++import type { Storage } from "../../storage/types.js";
++import { sha256Hex } from "./digest.js";
++import type { KeyedLock } from "./keyed-lock.js";
++import type { PrivateOriginalStore } from "./private-originals.js";
++import { PrivateOriginalError } from "./private-originals.js";
++import type { StableKeyWriter } from "./public-local.js";
++import { MEDIA_REVISIONS_PREFIX } from "./revision-keys.js";
++
++export interface PublicObjectsContext {
++	repo: MediaOperationsRepository;
++	/** The public storage itself, not the revision-aware view of it. */
++	storage: Storage;
++	originals: PrivateOriginalStore;
++	withLock: KeyedLock;
++	/** Atomic replacement of a stable key; without it the storage's own upload is used. */
++	stableKeys?: StableKeyWriter;
++	isCandidateInFlight: (sha256: string) => boolean;
++}
++
++async function readObject(storage: Storage, key: string): Promise<Uint8Array | null> {
++	try {
++		const result = await storage.download(key);
++		return new Uint8Array(await new Response(result.body).arrayBuffer());
++	} catch {
++		return null;
++	}
++}
++
++/**
++ * Make sure `bytes` are held, verified, in the private store and recorded.
++ * With `recordUnknown` unset, bytes that no record names are left alone and
++ * the result is false.
++ */
++async function ensureRetained(
++	context: PublicObjectsContext,
++	bytes: Uint8Array,
++	mimeType: string,
++	options: { recordUnknown: boolean },
++): Promise<boolean> {
++	const sha256 = await sha256Hex(bytes);
++	return context.withLock(`original:${sha256}`, async () => {
++		const record = await context.repo.getOriginal(sha256);
++		if (!record && !options.recordUnknown) return false;
++		// Verifies the private copy against its digest and rewrites a missing or damaged one.
++		const retained = await context.originals.retain(bytes, record?.mime_type ?? mimeType);
++		if (!record)
++			await context.repo.recordOriginal({
++				sha256: retained.sha256,
++				storageKey: retained.storageKey,
++				size: retained.size,
++				mimeType,
++			});
++		return true;
++	});
++}
++
++/**
++ * Rewrite a media item's stable key with its active revision's bytes. Returns
++ * the key when it was rewritten, null when it already held them or the item
++ * has no separate stable object to maintain. Throws when the active revision
++ * cannot be read back verified, leaving the stable key as it was.
++ */
++export async function mirrorActiveRevision(
++	context: PublicObjectsContext,
++	mediaId: string,
++): Promise<string | null> {
++	const { repo, storage } = context;
++	return context.withLock(`stable:${mediaId}`, async () => {
++		const media = await repo.getManagedMedia(mediaId);
++		if (!media || media.objectKey === media.storageKey) return null;
++		// The key is another row's object too; its bytes are not this item's alone to replace.
++		if ((await repo.countMediaWithStorageKey(media.storageKey)) > 1) return null;
++
++		const active = await readObject(storage, media.objectKey);
++		if (!active || !media.sha256 || (await sha256Hex(active)) !== media.sha256)
++			throw new Error(`The active revision of media ${mediaId} could not be read back verified`);
++
++		const current = await readObject(storage, media.storageKey);
++		if (current) {
++			if ((await sha256Hex(current)) === media.sha256) return null;
++			await ensureRetained(context, current, media.mimeType, { recordUnknown: true });
++		} else if (await storage.exists(media.storageKey)) {
++			throw new Error(`The stable object of media ${mediaId} exists but could not be read`);
++		}
++
++		if (context.stableKeys) await context.stableKeys.write(media.storageKey, active);
++		else await storage.upload({ key: media.storageKey, body: active, contentType: media.mimeType });
++		const written = await readObject(storage, media.storageKey);
++		if (!written || (await sha256Hex(written)) !== media.sha256)
++			throw new Error(`The stable object of media ${mediaId} does not match the active revision`);
++
++		// Deleted meanwhile: the deletion may have removed the stable object before this write.
++		if (!(await repo.getManagedMedia(mediaId))) {
++			await storage.delete(media.storageKey);
++			return null;
++		}
++		return media.storageKey;
++	});
++}
++
++function digestOfRevisionKey(key: string): string {
++	return key.slice(MEDIA_REVISIONS_PREFIX.length).split(".")[0] ?? "";
++}
++
++/**
++ * Remove a revision object nothing needs. `orphan`: no record gives it any
++ * history (allowed only with `orphans`, for objects past the grace period).
++ * `superseded`: it was published and is no media item's active revision any
++ * more, and its bytes are verified in the private store. Null when it is kept.
++ */
++export async function removeRevisionObject(
++	context: PublicObjectsContext,
++	key: string,
++	options: { orphans: boolean; superseded: boolean },
++): Promise<"orphan" | "superseded" | null> {
++	const { repo, storage } = context;
++	if (!key.startsWith(MEDIA_REVISIONS_PREFIX)) return null;
++	const named = digestOfRevisionKey(key);
++	return context.withLock(`object:${key}`, async () => {
++		if (context.isCandidateInFlight(named)) return null;
++		if (await repo.hasOpenOperationForCandidate(named)) return null;
++		if (!(await repo.isRevisionObjectInUse(key))) {
++			if (!options.orphans) return null;
++			await storage.delete(key);
++			return "orphan";
++		}
++		if (!options.superseded || (await repo.isRevisionObjectActive(key))) return null;
++		const bytes = await readObject(storage, key);
++		if (!bytes) return null;
++		try {
++			if (
++				!(await ensureRetained(context, bytes, "application/octet-stream", {
++					recordUnknown: false,
++				}))
++			)
++				return null;
++		} catch (error) {
++			// Without a verified private copy the public object is the only one; it stays.
++			if (error instanceof PrivateOriginalError) return null;
++			throw error;
++		}
++		await storage.delete(key);
++		return "superseded";
++	});
++}
+diff --git a/packages/core/src/media/safe/reconciliation.ts b/packages/core/src/media/safe/reconciliation.ts
+index 29229928a6bde4c77ec65de9a6cd1e9b9edf41e5..dcec22a431e1491a20e103b5b3969e57246e898e 100644
+--- a/packages/core/src/media/safe/reconciliation.ts
++++ b/packages/core/src/media/safe/reconciliation.ts
+@@ -7,25 +7,23 @@
+  * record, a temporary file of an unfinished write). Interrupted operations are
+  * ended by the replacement service; this module removes what they left behind.
+  *
+- * It never deletes an object a record still needs: the stable key of a media
+- * item is never listed, revision objects that were ever active, are a source or
+- * belong to an open operation are kept, and recorded originals are kept. Each
+- * deletion re-checks under the same lock that writers hold between writing an
+- * object and recording it.
++ * It never deletes an object a record still needs: the object of an active
++ * revision and of an open operation's candidate is kept, and recorded originals
++ * are kept. A revision object that was published and later superseded is
++ * removed once its bytes are verified in the private store, and a published
++ * operation whose public storage was not brought in line (see
++ * `public-objects.ts`) has that finished. Each deletion re-checks under the
++ * same lock that writers hold between writing an object and recording it.
+  *
+  * Only one writing process is assumed. Work of other processes is protected by
+  * the grace period alone: operations and objects changed within it are left.
+  */
+ 
+-import type { Kysely } from "kysely";
+-
+ import type { MediaOperation } from "../../database/repositories/media-operations.js";
+-import { MediaOperationsRepository } from "../../database/repositories/media-operations.js";
+-import type { Database } from "../../database/types.js";
+ import type { Storage } from "../../storage/types.js";
+-import type { KeyedLock } from "./keyed-lock.js";
+ import { isSha256Hex } from "./original-keys.js";
+-import type { PrivateOriginalStore } from "./private-originals.js";
++import type { PublicObjectsContext } from "./public-objects.js";
++import { removeRevisionObject } from "./public-objects.js";
+ import type { ReplaceResult } from "./replacement-service.js";
+ import { MEDIA_REVISIONS_PREFIX } from "./revision-keys.js";
+ 
+@@ -41,7 +39,10 @@ export interface ReconcileOptions {
+ 	graceMs?: number;
+ 	/** Clock for the grace period. */
+ 	now?: Date;
+-	/** Most open operations handled in one run (default 1000). */
++	/**
++	 * Most open operations, most owed public cleanups and most superseded revision
++	 * objects handled in one run (default 1000 each); the rest wait for the next run.
++	 */
+ 	limit?: number;
+ }
+ 
+@@ -64,10 +65,16 @@ export interface ReconciliationReport {
+ 	operations: ReconciledOperation[];
+ 	/** Open operations left alone: running in this process or inside the grace period. */
+ 	skipped: number;
+-	/** False when more open operations remain than one run handles. */
++	/** False when more work remains than one run handles. */
+ 	complete?: boolean;
+ 	/** Keys of removed candidate objects in the active storage. */
+ 	removedCandidateObjects: string[];
++	/** Stable keys rewritten with their media item's active revision. */
++	mirroredStableKeys: string[];
++	/** Keys of removed revision objects that were superseded and are retained privately. */
++	removedSupersededObjects: string[];
++	/** Published operations whose public storage is still to be brought in line. */
++	pendingPublicCleanups: number;
+ 	/** Digests of removed private original objects that no record referenced. */
+ 	removedOriginals: string[];
+ 	removedTemporaryFiles: number;
+@@ -117,28 +124,26 @@ async function listRevisionObjects(
+ 	return found;
+ }
+ 
+-export async function sweepOrphans(context: {
+-	db: Kysely<Database>;
+-	storage: Storage;
+-	originals: PrivateOriginalStore;
+-	withLock: KeyedLock;
+-	cutoff: Date;
+-	isCandidateInFlight: (sha256: string) => boolean;
+-	report: ReconciliationReport;
+-}): Promise<void> {
+-	const { db, storage, originals, withLock, cutoff, report } = context;
+-	const repo = new MediaOperationsRepository(db);
++export async function sweepOrphans(
++	context: PublicObjectsContext & {
++		cutoff: Date;
++		/** Most superseded objects removed in this run. */
++		limit: number;
++		report: ReconciliationReport;
++	},
++): Promise<void> {
++	const { repo, storage, originals, withLock, cutoff, report } = context;
+ 
+ 	for (const object of await listRevisionObjects(storage)) {
+-		if (!(object.lastModified < cutoff)) continue;
+-		const removed = await withLock(`object:${object.key}`, async () => {
+-			if (context.isCandidateInFlight(object.sha256)) return false;
+-			if (await repo.hasOpenOperationForCandidate(object.sha256)) return false;
+-			if (await repo.isRevisionObjectInUse(object.key)) return false;
+-			await storage.delete(object.key);
+-			return true;
++		const budget = context.limit - report.removedSupersededObjects.length;
++		if (budget <= 0) report.complete = false;
++		const removed = await removeRevisionObject(context, object.key, {
++			// An unrecorded object may have just been written; a superseded one is settled by records.
++			orphans: object.lastModified < cutoff,
++			superseded: budget > 0,
+ 		});
+-		if (removed) report.removedCandidateObjects.push(object.key);
++		if (removed === "orphan") report.removedCandidateObjects.push(object.key);
++		if (removed === "superseded") report.removedSupersededObjects.push(object.key);
+ 	}
+ 
+ 	for (const original of await originals.list()) {
+@@ -151,5 +156,7 @@ export async function sweepOrphans(context: {
+ 		if (removed) report.removedOriginals.push(original.sha256);
+ 	}
+ 
+-	report.removedTemporaryFiles = await originals.removeTemporaryFiles(cutoff);
++	report.removedTemporaryFiles =
++		(await originals.removeTemporaryFiles(cutoff)) +
++		((await context.stableKeys?.removeTemporaryFiles(cutoff)) ?? 0);
+ }
+diff --git a/packages/core/src/media/safe/recovery.ts b/packages/core/src/media/safe/recovery.ts
+index 4a7ac45d4fac7188ce8ebff643414418420ec0ec..8baaff281451d021fcb262a1f7e77305650df24c 100644
+--- a/packages/core/src/media/safe/recovery.ts
++++ b/packages/core/src/media/safe/recovery.ts
+@@ -23,6 +23,7 @@ import { LocalStorage } from "../../storage/local.js";
+ import { ImageDecodeError } from "./decoder.js";
+ import { createLocalPrivateStorage } from "./private-local.js";
+ import { createPrivateOriginalStore } from "./private-originals.js";
++import { createLocalStableKeyWriter } from "./public-local.js";
+ import type { ReconcileOptions, ReconciliationReport } from "./reconciliation.js";
+ import type { ReplaceResult, RestorableOriginal } from "./replacement-service.js";
+ import { createMediaReplacementService } from "./replacement-service.js";
+@@ -97,6 +98,7 @@ export async function openSafeMediaRecovery(
+ 			db,
+ 			storage,
+ 			originals,
++			stableKeys: createLocalStableKeyWriter(options.uploadsDirectory),
+ 			// Recovery never replaces with new bytes, so it needs no decoder.
+ 			validator: createOutputValidator({
+ 				decoder: {
+diff --git a/packages/core/src/media/safe/replacement-service.ts b/packages/core/src/media/safe/replacement-service.ts
+index 9a22d6df6438cc8305358e3eaac9b8058c39ae16..2704238b5d6f110554ae5e278151393b77992a5e 100644
+--- a/packages/core/src/media/safe/replacement-service.ts
++++ b/packages/core/src/media/safe/replacement-service.ts
+@@ -17,10 +17,16 @@
+  * identical request returns the stored outcome (or resumes an interrupted
+  * one); the same ID with different input is refused.
+  *
++ * After the commit the public storage is brought in line with it: the stable
++ * key is rewritten with the active revision's bytes and the superseded revision
++ * object is removed, each only once the bytes it displaces are verified in the
++ * private store. Until that is recorded the operation owes a public cleanup.
++ *
+  * Reconciliation ({@link MediaReplacementService.reconcile}) ends operations
+  * that were interrupted and never retried: those whose candidate is durably
+  * staged are completed through the same fenced steps, earlier ones are
+- * aborted, and objects that no record references are removed.
++ * aborted, owed public cleanups are finished, and objects that no record
++ * needs are removed.
+  */
+ 
+ import type { Kysely, Transaction } from "kysely";
+@@ -47,6 +53,9 @@ import { createKeyedLock } from "./keyed-lock.js";
+ import { isSha256Hex } from "./original-keys.js";
+ import type { PrivateOriginalStore } from "./private-originals.js";
+ import { PrivateOriginalError } from "./private-originals.js";
++import type { StableKeyWriter } from "./public-local.js";
++import type { PublicObjectsContext } from "./public-objects.js";
++import { mirrorActiveRevision, removeRevisionObject } from "./public-objects.js";
+ import type { ReconcileOptions, ReconciliationReport } from "./reconciliation.js";
+ import { DEFAULT_RECONCILE_GRACE_MS, reconciledOutcome, sweepOrphans } from "./reconciliation.js";
+ import { revisionObjectKey } from "./revision-keys.js";
+@@ -61,7 +70,10 @@ export type ReplacementStep =
+ 	| "original-object-retained"
+ 	| "original-retained"
+ 	| "publish-prepared"
+-	| "published";
++	| "published"
++	| "public-mirrored"
++	| "public-superseded-removed"
++	| "public-cleaned";
+ 
+ export type ReplacementRejectionCode =
+ 	| OutputRejectionCode
+@@ -184,6 +196,12 @@ export interface ReplacementServiceOptions {
+ 	/** The active storage that serves public media. */
+ 	storage: Storage;
+ 	originals: PrivateOriginalStore;
++	/**
++	 * Atomic replacement of a stable key in `storage`. Without it the stable key is
++	 * rewritten with `storage.upload`, which a reader bypassing the host may observe
++	 * half-written on storages whose upload is not atomic.
++	 */
++	stableKeys?: StableKeyWriter;
+ 	validator: ReturnType<typeof createOutputValidator>;
+ 	/** Called once after each successful publication, for cache invalidation. */
+ 	onPublished?: (receipt: PublishedReceipt) => void;
+@@ -329,6 +347,14 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 	/** Operations running in this process, and the candidate digests they may write. */
+ 	const inFlight = new Map<string, number>();
+ 	const inFlightCandidates = new Map<string, number>();
++	const publicObjects: PublicObjectsContext = {
++		repo,
++		storage,
++		originals,
++		withLock,
++		stableKeys: options.stableKeys,
++		isCandidateInFlight: (sha256) => inFlightCandidates.has(sha256),
++	};
+ 
+ 	async function tracked<T>(
+ 		mediaId: string,
+@@ -351,8 +377,27 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		}
+ 	}
+ 
++	class StepInterruption extends Error {
++		constructor(readonly thrown: unknown) {
++			super("A step observer interrupted the operation");
++		}
++	}
++
+ 	async function step(name: ReplacementStep, mediaId: string, operationId: string): Promise<void> {
+-		await options.onStep?.(name, { mediaId, operationId });
++		try {
++			await options.onStep?.(name, { mediaId, operationId });
++		} catch (error) {
++			throw new StepInterruption(error);
++		}
++	}
++
++	/** The step seam abandons an operation as a crash would: its error reaches the caller as thrown. */
++	async function unwrappingInterruptions<T>(work: () => Promise<T>): Promise<T> {
++		try {
++			return await work();
++		} catch (error) {
++			throw error instanceof StepInterruption ? error.thrown : error;
++		}
+ 	}
+ 
+ 	function rejected(code: ReplacementRejectionCode, receipt?: RejectedReceipt): ReplaceResult {
+@@ -412,6 +457,32 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		return true;
+ 	}
+ 
++	/**
++	 * Bring the public storage in line with a published operation and record that.
++	 * Repeatable: every step checks what is there. A throw leaves the cleanup owed.
++	 */
++	async function cleanPublic(
++		operation: Pick<MediaOperation, "media_id" | "operation_id" | "expected_revision_id">,
++	): Promise<{ mirrored: string | null; removed: string | null }> {
++		const mediaId = operation.media_id;
++		const operationId = operation.operation_id;
++		const mirrored = await mirrorActiveRevision(publicObjects, mediaId);
++		await step("public-mirrored", mediaId, operationId);
++		const source = await repo.getRevision(operation.expected_revision_id);
++		const removed =
++			source &&
++			(await removeRevisionObject(publicObjects, source.object_key, {
++				orphans: false,
++				superseded: true,
++			}))
++				? source.object_key
++				: null;
++		await step("public-superseded-removed", mediaId, operationId);
++		await repo.markPublicCleaned(mediaId, operationId);
++		await step("public-cleaned", mediaId, operationId);
++		return { mirrored, removed };
++	}
++
+ 	async function atomically<T>(work: (trx: Transaction<Database>) => Promise<T>): Promise<T> {
+ 		try {
+ 			return await db.transaction().execute(work);
+@@ -451,8 +522,10 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			return rejected("INVALID_REQUEST");
+ 		}
+ 		const candidateSha256 = await sha256Hex(request.bytes);
+-		return tracked(request.mediaId, request.operationId, candidateSha256, () =>
+-			refuseNonAtomic(() => run(request, candidateSha256)),
++		return unwrappingInterruptions(() =>
++			tracked(request.mediaId, request.operationId, candidateSha256, () =>
++				refuseNonAtomic(() => run(request, candidateSha256)),
++			),
+ 		);
+ 	}
+ 
+@@ -683,8 +756,10 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			request.originalSha256,
+ 		);
+ 		if (!chosen) return rejected("NO_ORIGINAL");
+-		return tracked(request.mediaId, request.operationId, chosen.sha256, () =>
+-			refuseNonAtomic(() => runRestore(request, chosen)),
++		return unwrappingInterruptions(() =>
++			tracked(request.mediaId, request.operationId, chosen.sha256, () =>
++				refuseNonAtomic(() => runRestore(request, chosen)),
++			),
+ 		);
+ 	}
+ 
+@@ -850,7 +925,7 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		// --- Publish: the single commit point ---
+ 		if (operation.state === "original_retained") {
+ 			const ready = operation;
+-			return withLock(`object:${candidate.object_key}`, async () => {
++			const outcome = await withLock(`object:${candidate.object_key}`, async () => {
+ 				// The candidate object is verified again at the commit boundary; it may have been lost since staging.
+ 				try {
+ 					await ensureCandidateObject(
+@@ -899,8 +974,23 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 				if (!published) return reject(ready, "CONFLICT");
+ 				await step("published", mediaId, operationId);
+ 				options.onPublished?.(receipt);
+-				return { ok: true, receipt, replayed: false };
++				const result: ReplaceResult = { ok: true, receipt, replayed: false };
++				return result;
+ 			});
++			// Outside the candidate's lock: the cleanup takes the lock of the superseded object.
++			if (outcome.ok && !outcome.replayed) {
++				try {
++					await cleanPublic(ready);
++				} catch (error) {
++					if (error instanceof StepInterruption) throw error;
++					// The publication stands; reconciliation finishes the owed cleanup.
++					console.error(
++						`[safe-media] Public cleanup after operation ${operationId} on media ${mediaId} is still owed:`,
++						error,
++					);
++				}
++			}
++			return outcome;
+ 		}
+ 
+ 		// The operation finished while we were working (another worker, or a retry that overtook us).
+@@ -943,6 +1033,9 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			operations: [],
+ 			skipped: 0,
+ 			removedCandidateObjects: [],
++			mirroredStableKeys: [],
++			removedSupersededObjects: [],
++			pendingPublicCleanups: 0,
+ 			removedOriginals: [],
+ 			removedTemporaryFiles: 0,
+ 		};
+@@ -961,7 +1054,8 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 			try {
+ 				const result = await reconcileOperation(operation);
+ 				report.operations.push(reconciledOutcome(operation, result));
+-			} catch (error) {
++			} catch (thrown) {
++				const error = thrown instanceof StepInterruption ? thrown.thrown : thrown;
+ 				report.operations.push({
+ 					mediaId: operation.media_id,
+ 					operationId: operation.operation_id,
+@@ -972,15 +1066,29 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 				});
+ 			}
+ 		}
+-		await sweepOrphans({
+-			db,
+-			storage,
+-			originals,
+-			withLock,
+-			cutoff,
+-			isCandidateInFlight: (sha256) => inFlightCandidates.has(sha256),
+-			report,
+-		});
++		const owed = await repo.listPendingPublicCleanups(limit);
++		if (owed.length >= limit) report.complete = false;
++		for (const operation of owed) {
++			if (
++				inFlight.has(operationKey(operation.media_id, operation.operation_id)) ||
++				!(new Date(operation.completed_at ?? operation.updated_at) < cutoff)
++			) {
++				report.pendingPublicCleanups++;
++				continue;
++			}
++			try {
++				const cleaned = await cleanPublic(operation);
++				if (cleaned.mirrored) report.mirroredStableKeys.push(cleaned.mirrored);
++				if (cleaned.removed) report.removedSupersededObjects.push(cleaned.removed);
++			} catch (error) {
++				report.pendingPublicCleanups++;
++				console.error(
++					`[safe-media] Public cleanup after operation ${operation.operation_id} on media ${operation.media_id} failed:`,
++					error instanceof StepInterruption ? error.thrown : error,
++				);
++			}
++		}
++		await sweepOrphans({ ...publicObjects, cutoff, limit, report });
+ 		return report;
+ 	}
+ 
+diff --git a/packages/core/src/media/safe/resolve-object.ts b/packages/core/src/media/safe/resolve-object.ts
+index 6add6cb2ceb0d8884aaf7f283b7e28ba7ed3af76..8bb56fa2ca803866b66921adcb16e2e1e88b8085 100644
+--- a/packages/core/src/media/safe/resolve-object.ts
++++ b/packages/core/src/media/safe/resolve-object.ts
+@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
+ 
+ import { MediaOperationsRepository } from "../../database/repositories/media-operations.js";
+ import type { Database } from "../../database/types.js";
++import type { DownloadResult, Storage } from "../../storage/types.js";
+ import { errorText } from "./error-text.js";
+ 
+ const MISSING_TABLE = /no such table|does not exist|no such column/i;
+@@ -25,3 +26,34 @@ export async function resolveActiveObjectKey(
+ 		throw error;
+ 	}
+ }
++
++function isNotFound(error: unknown): boolean {
++	return (
++		error instanceof Error &&
++		(Reflect.get(error, "code") === "NOT_FOUND" || error.message.includes("not found"))
++	);
++}
++
++/**
++ * Download the active revision of a stable key. A superseded revision object
++ * is removed once a newer revision is published, so a reader that resolved the
++ * key just before that finds nothing there; it resolves again and reads the
++ * revision that replaced it, instead of reporting the media as missing.
++ */
++export async function downloadActiveObject(
++	storage: Storage,
++	db: Kysely<Database> | undefined,
++	storageKey: string,
++): Promise<DownloadResult> {
++	let objectKey = await resolveActiveObjectKey(db, storageKey);
++	for (;;) {
++		try {
++			return await storage.download(objectKey);
++		} catch (error) {
++			if (!isNotFound(error)) throw error;
++			const current = await resolveActiveObjectKey(db, storageKey);
++			if (current === objectKey) throw error;
++			objectKey = current;
++		}
++	}
++}
+diff --git a/packages/core/src/media/safe/revision-keys.ts b/packages/core/src/media/safe/revision-keys.ts
+index ebb2dfd527aa3eb794cebc6cef26ce4399e30ce3..615bd9c81d716e40f18ba04468bc1f5b67ff4fb7 100644
+--- a/packages/core/src/media/safe/revision-keys.ts
++++ b/packages/core/src/media/safe/revision-keys.ts
+@@ -7,6 +7,11 @@
+  * must not be able to request these keys directly (a superseded or rejected
+  * candidate would otherwise be fetchable), so the prefix is refused by the
+  * public route like the other private prefixes.
++ *
++ * A revision object exists only while its revision is active or its operation
++ * is open: once superseded it is removed, its bytes being retained privately.
++ * The object at the stable key is a copy of the active revision for readers
++ * that do not resolve revisions (see `public-objects.ts`).
+  */
+ 
+ import type { SafeImageFormat } from "./decode-limits.js";
+diff --git a/packages/core/src/media/safe/runtime.ts b/packages/core/src/media/safe/runtime.ts
+index b4c89c41a7589b2901701dc023ab3b75375c7448..1f2924dea23fa3324141a8c5c5da500e656f3c30 100644
+--- a/packages/core/src/media/safe/runtime.ts
++++ b/packages/core/src/media/safe/runtime.ts
+@@ -28,10 +28,11 @@ import type { SafeMediaHostProfile, SafeMediaSupport } from "./plugin-access.js"
+ import { SAFE_MEDIA_PROTOCOL } from "./plugin-access.js";
+ import { createLocalPrivateStorage, PrivateStorageConfigError } from "./private-local.js";
+ import { createPrivateOriginalStore } from "./private-originals.js";
++import { createLocalStableKeyWriter } from "./public-local.js";
+ import type { ReconcileOptions, ReconciliationReport } from "./reconciliation.js";
+ import type { MediaReplacementService, PublishedReceipt } from "./replacement-service.js";
+ import { createMediaReplacementService } from "./replacement-service.js";
+-import { resolveActiveObjectKey } from "./resolve-object.js";
++import { downloadActiveObject, resolveActiveObjectKey } from "./resolve-object.js";
+ import { createSharpChildDecoder } from "./sharp-child-decoder.js";
+ import { createOutputValidator } from "./validate-output.js";
+ 
+@@ -63,11 +64,16 @@ class RevisionAwareStorage implements Storage {
+ 	}
+ 
+ 	async download(key: string): Promise<DownloadResult> {
+-		return this.inner.download(await this.objectKey(key));
++		if (!STABLE_KEY.test(key)) return this.inner.download(key);
++		return downloadActiveObject(this.inner, this.resolveDb(), key);
+ 	}
+ 
+ 	async exists(key: string): Promise<boolean> {
+-		return this.inner.exists(await this.objectKey(key));
++		const objectKey = await this.objectKey(key);
++		if (await this.inner.exists(objectKey)) return true;
++		// The revision may have been superseded, and its object removed, since it was resolved.
++		const current = await this.objectKey(key);
++		return current !== objectKey && this.inner.exists(current);
+ 	}
+ 
+ 	upload(options: Parameters<Storage["upload"]>[0]): Promise<UploadResult> {
+@@ -171,13 +177,19 @@ export async function runSafeMediaReconciliation(
+ 		const changed =
+ 			report.operations.length +
+ 			report.removedCandidateObjects.length +
++			report.mirroredStableKeys.length +
++			report.removedSupersededObjects.length +
+ 			report.removedOriginals.length +
+ 			report.removedTemporaryFiles;
+ 		if (changed > 0) {
+ 			console.log(
+-				`[safe-media] Reconciled ${report.operations.length} interrupted operation(s); removed ${report.removedCandidateObjects.length} candidate object(s), ${report.removedOriginals.length} unrecorded original(s) and ${report.removedTemporaryFiles} temporary file(s)`,
++				`[safe-media] Reconciled ${report.operations.length} interrupted operation(s); rewrote ${report.mirroredStableKeys.length} stable object(s) with their active revision; removed ${report.removedSupersededObjects.length} superseded revision object(s), ${report.removedCandidateObjects.length} candidate object(s), ${report.removedOriginals.length} unrecorded original(s) and ${report.removedTemporaryFiles} temporary file(s)`,
+ 			);
+ 		}
++		if (report.pendingPublicCleanups > 0)
++			console.error(
++				`[safe-media] ${report.pendingPublicCleanups} published operation(s) still owe a public storage cleanup`,
++			);
+ 		const failed = report.operations.filter((operation) => operation.outcome === "failed");
+ 		if (failed.length > 0)
+ 			console.error("[safe-media] Reconciliation left operations open:", failed);
+@@ -221,6 +233,7 @@ export function createSafeMedia(options: CreateSafeMediaOptions): SafeMedia {
+ 		db: options.db,
+ 		storage: rawStorage,
+ 		originals,
++		stableKeys: typeof directory === "string" ? createLocalStableKeyWriter(directory) : undefined,
+ 		validator,
+ 		onPublished: options.onPublished,
+ 	});
+diff --git a/packages/core/src/storage/local.ts b/packages/core/src/storage/local.ts
+index 8658c2c3cbda734f96a2f5081998b9700cf5a565..daddeb508ed4a1176314a31171d95b0c46090f1a 100644
+--- a/packages/core/src/storage/local.ts
++++ b/packages/core/src/storage/local.ts
+@@ -4,7 +4,6 @@
+  * For development and testing. Stores files in a local directory.
+  */
+ 
+-import { createReadStream, existsSync } from "node:fs";
+ import * as fs from "node:fs/promises";
+ import * as path from "node:path";
+ import { Readable } from "node:stream";
+@@ -112,12 +111,26 @@ export class LocalStorage implements Storage {
+ 		try {
+ 			const filePath = this.getFilePath(key);
+ 
+-			if (!existsSync(filePath)) {
+-				throw new EmDashStorageError(`File not found: ${key}`, "NOT_FOUND");
++			// Opened before anything is reported, so the size and the bytes come from one
++			// file even if the key is replaced or removed while the body is being read.
++			let handle: fs.FileHandle;
++			try {
++				handle = await fs.open(filePath, "r");
++			} catch (error) {
++				if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
++					throw new EmDashStorageError(`File not found: ${key}`, "NOT_FOUND");
++				}
++				throw error;
+ 			}
+-
+-			const stat = await fs.stat(filePath);
+-			const nodeStream = createReadStream(filePath);
++			let stat;
++			try {
++				stat = await handle.stat();
++				if (!stat.isFile()) throw new EmDashStorageError(`File not found: ${key}`, "NOT_FOUND");
++			} catch (error) {
++				await handle.close();
++				throw error;
++			}
++			const nodeStream = handle.createReadStream();
+ 
+ 			// Convert Node.js stream to web ReadableStream
+ 			// Readable.toWeb returns ReadableStream (which is ReadableStream<unknown>),
+diff --git a/packages/core/tests/unit/database/migrations/093_safe_media_public_cleanup.test.ts b/packages/core/tests/unit/database/migrations/093_safe_media_public_cleanup.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fc14b14581b6d6e1613e67da54da3c843ac45ce
+--- /dev/null
++++ b/packages/core/tests/unit/database/migrations/093_safe_media_public_cleanup.test.ts
+@@ -0,0 +1,71 @@
++import type { Kysely } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { down, up } from "../../../../src/database/migrations/093_safe_media_public_cleanup.js";
++import { MediaOperationsRepository } from "../../../../src/database/repositories/media-operations.js";
++import type { Database } from "../../../../src/database/types.js";
++import { setupTestDatabase, teardownTestDatabase } from "../../../utils/test-db.js";
++
++const DIGEST = "a".repeat(64);
++
++describe("093_safe_media_public_cleanup migration", () => {
++	let db: Kysely<Database>;
++
++	beforeEach(async () => {
++		db = await setupTestDatabase();
++	});
++
++	afterEach(async () => {
++		await teardownTestDatabase(db);
++	});
++
++	async function columns(): Promise<string[]> {
++		const table = (await db.introspection.getTables()).find(
++			(each) => each.name === "_emdash_media_operations",
++		);
++		return table?.columns.map((column) => column.name) ?? [];
++	}
++
++	it("marks operations published before it as owing a public cleanup, and is safe to run twice", async () => {
++		await down(db as Kysely<unknown>);
++		expect(await columns()).not.toContain("public_cleaned_at");
++		const now = new Date().toISOString();
++		const operation = {
++			media_id: "media-1",
++			kind: "replace",
++			fingerprint: "f",
++			expected_revision_id: "r0",
++			candidate_sha256: DIGEST,
++			candidate_revision_id: "r1",
++			original_sha256: DIGEST,
++			receipt: null,
++			error_code: null,
++			created_by: null,
++			created_at: now,
++			updated_at: now,
++			completed_at: now,
++		};
++		await db
++			.insertInto("_emdash_media_operations")
++			.values([
++				{ ...operation, operation_id: "published", state: "published" },
++				{ ...operation, operation_id: "rejected", state: "rejected" },
++				{ ...operation, operation_id: "open", state: "original_retained", completed_at: null },
++			] as never)
++			.execute();
++
++		await up(db as Kysely<unknown>);
++		await up(db as Kysely<unknown>);
++
++		expect(await columns()).toContain("public_cleaned_at");
++		const repo = new MediaOperationsRepository(db);
++		expect((await repo.listPendingPublicCleanups()).map((each) => each.operation_id)).toEqual([
++			"published",
++		]);
++		await repo.markPublicCleaned("media-1", "published");
++		expect(await repo.listPendingPublicCleanups()).toEqual([]);
++		// Only a published operation can be marked.
++		await repo.markPublicCleaned("media-1", "open");
++		expect((await repo.getOperation("media-1", "open"))?.public_cleaned_at ?? null).toBeNull();
++	});
++});
+diff --git a/packages/core/tests/unit/media/safe/native-access.test.ts b/packages/core/tests/unit/media/safe/native-access.test.ts
+index eee8179655e069735358ec8e73a2754cf6ee33c6..28c1d804fc1819ec4b4eba9d1261ff5d1cf31515 100644
+--- a/packages/core/tests/unit/media/safe/native-access.test.ts
++++ b/packages/core/tests/unit/media/safe/native-access.test.ts
+@@ -176,7 +176,7 @@ describe("native safe-media access", () => {
+ 				},
+ 			});
+ 			if (!replaced.ok) return;
+-			expect(sha(await readFile(join(root, "uploads", KEY)))).toBe(sha(originalBytes));
++			expect(sha(await readFile(join(root, "uploads", KEY)))).toBe(sha(optimized));
+ 			const current = (await safe.revision(mediaId))!;
+ 			expect(current).toMatchObject({
+ 				revisionId: replaced.receipt.newRevisionId,
+diff --git a/packages/core/tests/unit/media/safe/public-objects.test.ts b/packages/core/tests/unit/media/safe/public-objects.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..72072eab7de684628aacb335cce3a2636a140dba
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/public-objects.test.ts
+@@ -0,0 +1,882 @@
++import { createHash } from "node:crypto";
++import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Kysely, SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++import { handleMediaDelete } from "../../../../src/api/handlers/media.js";
++import { GET } from "../../../../src/astro/routes/api/media/file/[...key].js";
++import { runMigrations } from "../../../../src/database/migrations/runner.js";
++import { MediaRepository } from "../../../../src/database/repositories/media.js";
++import type { Database } from "../../../../src/database/types.js";
++import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
++import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
++import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import type { StableKeyWriter } from "../../../../src/media/safe/public-local.js";
++import { createLocalStableKeyWriter } from "../../../../src/media/safe/public-local.js";
++import { openSafeMediaRecovery } from "../../../../src/media/safe/recovery.js";
++import type { ReplacementStep } from "../../../../src/media/safe/replacement-service.js";
++import { createMediaReplacementService } from "../../../../src/media/safe/replacement-service.js";
++import { createRevisionAwareStorage } from "../../../../src/media/safe/runtime.js";
++import { createOutputValidator } from "../../../../src/media/safe/validate-output.js";
++import { LocalStorage } from "../../../../src/storage/local.js";
++import type { Storage } from "../../../../src/storage/types.js";
++import { computeContentHash } from "../../../../src/utils/hash.js";
++import { inProcessDecoder, noisy, solid } from "./output-fixtures.js";
++import { publicStorageProblems } from "./public-scan.js";
++
++const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
++const KEY = "01HZPUBLIC.png";
++const byName = (a: string, b: string) => a.localeCompare(b);
++
++class Died extends Error {}
++
++/** The steps after the commit, where an interruption leaves the public storage behind the database. */
++const CLEANUP_STEPS: ReplacementStep[] = [
++	"published",
++	"public-mirrored",
++	"public-superseded-removed",
++	"public-cleaned",
++];
++
++describe("public storage after publication", () => {
++	let root: string;
++	let db: Kysely<Database>;
++	let active: LocalStorage;
++	let originalBytes: Uint8Array;
++	let optimized: Uint8Array;
++	let second: Uint8Array;
++	let mediaId: string;
++
++	const uploads = () => join(root, "uploads");
++	const open = () =>
++		new Kysely<Database>({
++			dialect: new SqliteDialect({ database: openNodeSqliteDatabase(join(root, "site.db")) }),
++		});
++	const privateStorage = () =>
++		createLocalPrivateStorage({ directory: join(root, "private"), publicDirectories: [uploads()] });
++
++	function build(
++		options: {
++			onStep?: (step: ReplacementStep) => Promise<void> | void;
++			storage?: Storage;
++			privateStorage?: Storage;
++			stableKeys?: StableKeyWriter;
++		} = {},
++	) {
++		const onStep = options.onStep;
++		return createMediaReplacementService({
++			db,
++			storage: options.storage ?? active,
++			originals: createPrivateOriginalStore(options.privateStorage ?? privateStorage()),
++			stableKeys: options.stableKeys ?? createLocalStableKeyWriter(uploads()),
++			validator: createOutputValidator({ decoder: inProcessDecoder }),
++			onStep: onStep ? (step) => onStep(step) : undefined,
++		});
++	}
++	const dyingAt = (step: ReplacementStep) =>
++		build({
++			onStep: (current) => {
++				if (current === step) throw new Died(step);
++			},
++		});
++	async function restart(options?: Parameters<typeof build>[0]) {
++		await db.destroy();
++		db = open();
++		return build(options);
++	}
++	/** Reconcile as the only writer, after any grace period has passed. */
++	const settled = (extra: { limit?: number } = {}) => ({
++		graceMs: 0,
++		now: new Date(Date.now() + 60_000),
++		...extra,
++	});
++
++	const files = async (directory: string) =>
++		(await readdir(join(root, directory)).catch((): string[] => [])).toSorted(byName);
++	const stableBytes = async () => new Uint8Array(await readFile(join(uploads(), KEY)));
++	const revisionFile = (bytes: Uint8Array) => `${sha(bytes)}.png`;
++	const problems = () => publicStorageProblems(db, uploads());
++	const activeRevisionId = async (id = mediaId) =>
++		(
++			await db
++				.selectFrom("media")
++				.select("revision_id")
++				.where("id", "=", id)
++				.executeTakeFirstOrThrow()
++		).revision_id!;
++
++	/** What a visitor gets through the host's public file route. */
++	async function served(
++		key = KEY,
++		storage: Storage = createRevisionAwareStorage(active, () => db),
++	) {
++		const response = await GET({
++			params: { key },
++			locals: { emdash: { storage, db } },
++			request: new Request("https://example.com"),
++		} as never);
++		return {
++			status: response.status,
++			length: response.headers.get("Content-Length"),
++			bytes: response.status === 200 ? new Uint8Array(await response.arrayBuffer()) : null,
++		};
++	}
++	async function expectServed(bytes: Uint8Array) {
++		const response = await served();
++		expect(response.status).toBe(200);
++		expect(response.length).toBe(String(bytes.byteLength));
++		expect(sha(response.bytes!)).toBe(sha(bytes));
++	}
++
++	type Service = ReturnType<typeof build>;
++	const replaceWith = async (service: Service, bytes: Uint8Array, operationId: string) =>
++		service.replace({
++			mediaId,
++			operationId,
++			expectedRevisionId: await activeRevisionId(),
++			bytes,
++			expectedSha256: sha(bytes),
++		});
++	const restoreTo = async (service: Service, bytes: Uint8Array, operationId: string) =>
++		service.restore({
++			mediaId,
++			operationId,
++			expectedRevisionId: await activeRevisionId(),
++			originalSha256: sha(bytes),
++		});
++
++	/** Every recorded original is readable from the private store and matches its digest. */
++	async function expectOriginalsRecoverable(expected: Uint8Array[]) {
++		const store = createPrivateOriginalStore(privateStorage());
++		const recorded = await db.selectFrom("_emdash_media_originals").select("sha256").execute();
++		expect(recorded.map((row) => row.sha256).toSorted(byName)).toEqual(
++			expected.map(sha).toSorted(byName),
++		);
++		for (const bytes of expected) expect(sha(await store.read(sha(bytes)))).toBe(sha(bytes));
++	}
++
++	/** The state a site is in when it was replaced, restored and replaced again before this cleanup existed. */
++	async function asBeforeThisCleanup() {
++		await writeFile(join(uploads(), KEY), originalBytes);
++		await writeFile(join(uploads(), "media-revisions", revisionFile(optimized)), optimized);
++		await writeFile(join(uploads(), "media-revisions", revisionFile(originalBytes)), originalBytes);
++		await db.updateTable("_emdash_media_operations").set({ public_cleaned_at: null }).execute();
++	}
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-public-objects-"));
++		await mkdir(uploads(), { recursive: true });
++		db = open();
++		await runMigrations(db);
++		active = new LocalStorage({ directory: uploads(), baseUrl: "/media" });
++		originalBytes = await noisy(64, 48, "png");
++		optimized = await solid(64, 48, "#2060e0").png().toBuffer();
++		second = await solid(64, 48, "#e02060").png().toBuffer();
++		await active.upload({ key: KEY, body: originalBytes, contentType: "image/png" });
++		const media = await new MediaRepository(db).create({
++			filename: "photo.png",
++			mimeType: "image/png",
++			size: originalBytes.byteLength,
++			width: 64,
++			height: 48,
++			storageKey: KEY,
++			contentHash: await computeContentHash(originalBytes),
++			status: "ready",
++		});
++		mediaId = media.id;
++		await build().getSourceRevision(mediaId);
++	});
++
++	afterEach(async () => {
++		vi.restoreAllMocks();
++		await db.destroy();
++		await rm(root, { recursive: true, force: true });
++	});
++
++	describe("replace, restore, replace again, delete", () => {
++		it("leaves no retained original in the public storage after each published operation", async () => {
++			const service = build();
++			expect(await problems()).toEqual([]);
++
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			expect(await problems()).toEqual([]);
++			expect(sha(await stableBytes())).toBe(sha(optimized));
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(optimized)]);
++			await expectServed(optimized);
++			await expectOriginalsRecoverable([originalBytes]);
++
++			expect((await restoreTo(service, originalBytes, "restore-1")).ok).toBe(true);
++			expect(await problems()).toEqual([]);
++			expect(sha(await stableBytes())).toBe(sha(originalBytes));
++			// The optimized revision was superseded: its only copy is now the private one.
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(originalBytes)]);
++			await expectServed(originalBytes);
++			await expectOriginalsRecoverable([originalBytes, optimized]);
++
++			expect((await replaceWith(service, second, "op-2")).ok).toBe(true);
++			expect(await problems()).toEqual([]);
++			expect(sha(await stableBytes())).toBe(sha(second));
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(second)]);
++			await expectServed(second);
++			await expectOriginalsRecoverable([originalBytes, optimized]);
++
++			// Nothing is owed, so reconciliation changes nothing.
++			const report = await service.reconcile(settled());
++			expect(report).toMatchObject({
++				operations: [],
++				mirroredStableKeys: [],
++				removedSupersededObjects: [],
++				removedCandidateObjects: [],
++				pendingPublicCleanups: 0,
++			});
++			expect(await problems()).toEqual([]);
++		});
++
++		it("still lists, reads and restores every retained original byte for byte", async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			expect((await restoreTo(service, originalBytes, "restore-1")).ok).toBe(true);
++			expect((await replaceWith(service, second, "op-2")).ok).toBe(true);
++
++			expect(
++				(await service.listRestorableOriginals(mediaId))
++					.map((each) => each.sha256)
++					.toSorted(byName),
++			).toEqual([sha(originalBytes), sha(optimized)].toSorted(byName));
++			for (const bytes of [originalBytes, optimized]) {
++				const read = await service.readOriginal(mediaId, sha(bytes), 1024 * 1024);
++				expect(read).toMatchObject({ ok: true, sha256: sha(bytes), size: bytes.byteLength });
++				if (read.ok) expect(Buffer.from(read.bytes)).toEqual(Buffer.from(bytes));
++			}
++
++			// The optimized bytes exist nowhere in the public storage; the restore reads the private copy.
++			const restored = await restoreTo(service, optimized, "restore-2");
++			expect(restored).toMatchObject({
++				ok: true,
++				receipt: { kind: "restore", candidateSha256: sha(optimized), originalSha256: sha(second) },
++			});
++			await expectServed(optimized);
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(optimized));
++			expect(await problems()).toEqual([]);
++			await expectOriginalsRecoverable([originalBytes, optimized, second]);
++		});
++
++		it("restores through the recovery entry point, which keeps the public storage in line too", async () => {
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			await db.destroy();
++			const recovery = await openSafeMediaRecovery({
++				databasePath: join(root, "site.db"),
++				uploadsDirectory: uploads(),
++				privateDirectory: join(root, "private"),
++				publicDirectories: [join(root, "public")],
++			});
++			try {
++				expect(await recovery.restoreMedia(mediaId)).toMatchObject({
++					ok: true,
++					receipt: { candidateSha256: sha(originalBytes) },
++				});
++			} finally {
++				await recovery.close();
++			}
++			db = open();
++			await expectServed(originalBytes);
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(originalBytes));
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(originalBytes)]);
++			expect(await problems()).toEqual([]);
++		});
++
++		it("removes the revision object of deleted media when it holds a retained original, and recreates nothing", async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			expect((await restoreTo(service, originalBytes, "restore-1")).ok).toBe(true);
++			const storage = createRevisionAwareStorage(active, () => db);
++			expect(await handleMediaDelete(db, mediaId, storage)).toMatchObject({
++				success: true,
++				data: { storageDeleted: true },
++			});
++			// The deletion removed the stable key; the active revision's object held the original.
++			expect(await problems()).toEqual([
++				`media-revisions/${revisionFile(originalBytes)} holds retained original ${sha(originalBytes)}`,
++			]);
++
++			const report = await service.reconcile(settled());
++			expect(report.removedSupersededObjects).toEqual([
++				`media-revisions/${revisionFile(originalBytes)}`,
++			]);
++			expect(await problems()).toEqual([]);
++			expect(await files("uploads")).toEqual(["media-revisions"]);
++			expect(await files("uploads/media-revisions")).toEqual([]);
++			expect((await served()).status).toBe(404);
++			// Recovery data of deleted media is kept.
++			await expectOriginalsRecoverable([originalBytes, optimized]);
++			expect(await service.reconcile(settled())).toMatchObject({
++				removedSupersededObjects: [],
++				mirroredStableKeys: [],
++			});
++		});
++
++		it("keeps bytes of deleted media that are retained nowhere else", async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			await handleMediaDelete(
++				db,
++				mediaId,
++				createRevisionAwareStorage(active, () => db),
++			);
++			const report = await service.reconcile(settled());
++			expect(report.removedSupersededObjects).toEqual([]);
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(optimized)]);
++			expect(await problems()).toEqual([]);
++		});
++	});
++
++	describe("interruption after the commit", () => {
++		for (const step of CLEANUP_STEPS) {
++			it(`at ${step} of a replace, a restore and a second replace: readers serve the active revision, originals stay recoverable, reconciliation finishes`, async () => {
++				const chain: Array<{
++					run: (service: Service) => Promise<unknown>;
++					now: Uint8Array;
++					originals: Uint8Array[];
++				}> = [
++					{
++						run: (service) => replaceWith(service, optimized, "op-1"),
++						now: optimized,
++						originals: [originalBytes],
++					},
++					{
++						run: (service) => restoreTo(service, originalBytes, "restore-1"),
++						now: originalBytes,
++						originals: [originalBytes, optimized],
++					},
++					{
++						run: (service) => replaceWith(service, second, "op-2"),
++						now: second,
++						originals: [originalBytes, optimized],
++					},
++				];
++				for (const link of chain) {
++					await expect(link.run(dyingAt(step))).rejects.toThrow(Died);
++					// Whatever the cleanup reached, the host serves one complete active revision.
++					await expectServed(link.now);
++					await expectOriginalsRecoverable(link.originals);
++					// What a file server on the directory serves is the previous or the new image in full.
++					const direct = sha(await stableBytes());
++					expect([...chain.map((each) => sha(each.now)), sha(originalBytes)]).toContain(direct);
++
++					const service = await restart();
++					const report = await service.reconcile(settled());
++					expect(report.operations).toEqual([]);
++					expect(report.pendingPublicCleanups).toBe(0);
++					expect(await problems()).toEqual([]);
++					expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(link.now));
++					expect(await files("uploads/media-revisions")).toEqual([revisionFile(link.now)]);
++					await expectServed(link.now);
++					await expectOriginalsRecoverable(link.originals);
++					expect(
++						await db
++							.selectFrom("_emdash_media_operations")
++							.select("operation_id")
++							.where("public_cleaned_at", "is", null)
++							.execute(),
++					).toEqual([]);
++
++					// Running it again finds nothing to do.
++					expect(await service.reconcile(settled())).toMatchObject({
++						mirroredStableKeys: [],
++						removedSupersededObjects: [],
++						pendingPublicCleanups: 0,
++					});
++				}
++			});
++		}
++
++		it("says what reconciliation finished for an operation interrupted right after its commit", async () => {
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			await expect(restoreTo(dyingAt("published"), originalBytes, "restore-1")).rejects.toThrow(
++				Died,
++			);
++			// The database is ahead of the public storage: a retained original is still exposed.
++			expect(sha(await stableBytes())).toBe(sha(optimized));
++			expect(await problems()).not.toEqual([]);
++
++			const report = await (await restart()).reconcile(settled());
++			expect(report.mirroredStableKeys).toEqual([KEY]);
++			expect(report.removedSupersededObjects).toEqual([
++				`media-revisions/${revisionFile(optimized)}`,
++			]);
++			expect(await problems()).toEqual([]);
++		});
++
++		it("leaves an operation that is still inside the grace period to its own process", async () => {
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			const service = await restart();
++			const early = await service.reconcile();
++			expect(early).toMatchObject({ mirroredStableKeys: [], pendingPublicCleanups: 1 });
++			expect(sha(await stableBytes())).toBe(sha(originalBytes));
++			const later = await service.reconcile({ now: new Date(Date.now() + 3_600_000) });
++			expect(later).toMatchObject({ mirroredStableKeys: [KEY], pendingPublicCleanups: 0 });
++			expect(await problems()).toEqual([]);
++		});
++
++		it("publishes even when the cleanup fails, and reports the cleanup as owed until it succeeds", async () => {
++			const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
++			const broken: StableKeyWriter = {
++				write: () => Promise.reject(new Error("read-only file system")),
++				removeTemporaryFiles: () => Promise.resolve(0),
++			};
++			const result = await replaceWith(build({ stableKeys: broken }), optimized, "op-1");
++			expect(result).toMatchObject({ ok: true, replayed: false });
++			expect(log).toHaveBeenCalled();
++			await expectServed(optimized);
++			expect(sha(await stableBytes())).toBe(sha(originalBytes));
++
++			const failing = await build({ stableKeys: broken }).reconcile(settled());
++			expect(failing).toMatchObject({ mirroredStableKeys: [], pendingPublicCleanups: 1 });
++			expect(sha(await stableBytes())).toBe(sha(originalBytes));
++
++			expect(await build().reconcile(settled())).toMatchObject({
++				mirroredStableKeys: [KEY],
++				pendingPublicCleanups: 0,
++			});
++			expect(await problems()).toEqual([]);
++		});
++	});
++
++	describe("nothing public is overwritten or removed before it is verified in the private store", () => {
++		it("rewrites a damaged private original from the stable key before the stable key is overwritten", async () => {
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			const privateCopy = join(root, "private", "media-originals", sha(originalBytes));
++			await writeFile(privateCopy, originalBytes.subarray(0, 100));
++
++			await (await restart()).reconcile(settled());
++			expect(sha(await stableBytes())).toBe(sha(optimized));
++			expect(sha(await readFile(privateCopy))).toBe(sha(originalBytes));
++			await expectOriginalsRecoverable([originalBytes]);
++			expect(await problems()).toEqual([]);
++		});
++
++		it("rewrites a missing private original from the superseded object before that object is removed", async () => {
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			await expect(
++				restoreTo(dyingAt("public-mirrored"), originalBytes, "restore-1"),
++			).rejects.toThrow(Died);
++			expect(await files("uploads/media-revisions")).toContain(revisionFile(optimized));
++			const privateCopy = join(root, "private", "media-originals", sha(optimized));
++			await rm(privateCopy);
++
++			const report = await (await restart()).reconcile(settled());
++			expect(report.removedSupersededObjects).toEqual([
++				`media-revisions/${revisionFile(optimized)}`,
++			]);
++			expect(sha(await readFile(privateCopy))).toBe(sha(optimized));
++			await expectOriginalsRecoverable([originalBytes, optimized]);
++			expect(await problems()).toEqual([]);
++		});
++
++		it("keeps the stable key and the superseded object while the private store cannot hold their bytes", async () => {
++			vi.spyOn(console, "error").mockImplementation(() => undefined);
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			await expect(restoreTo(dyingAt("published"), originalBytes, "restore-1")).rejects.toThrow(
++				Died,
++			);
++			await rm(join(root, "private", "media-originals", sha(optimized)));
++			const inner = privateStorage();
++			const readOnly: Storage = {
++				upload: () => Promise.reject(new Error("disk full")),
++				download: (key) => inner.download(key),
++				delete: (key) => inner.delete(key),
++				exists: (key) => inner.exists(key),
++				list: (options) => inner.list(options),
++				getSignedUploadUrl: (options) => inner.getSignedUploadUrl(options),
++				getPublicUrl: (key) => inner.getPublicUrl(key),
++			};
++
++			const report = await (await restart({ privateStorage: readOnly })).reconcile(settled());
++			expect(report).toMatchObject({
++				mirroredStableKeys: [],
++				removedSupersededObjects: [],
++				pendingPublicCleanups: 1,
++			});
++			// The only verified copies of the optimized bytes are the public ones; both are untouched.
++			expect(sha(await stableBytes())).toBe(sha(optimized));
++			expect(sha(await readFile(join(uploads(), "media-revisions", revisionFile(optimized))))).toBe(
++				sha(optimized),
++			);
++			await expectServed(originalBytes);
++
++			// With the private store working again the same run completes, losing nothing.
++			expect(await (await restart()).reconcile(settled())).toMatchObject({
++				mirroredStableKeys: [KEY],
++				pendingPublicCleanups: 0,
++			});
++			await expectOriginalsRecoverable([originalBytes, optimized]);
++			expect(await problems()).toEqual([]);
++		});
++
++		it("retains bytes found at the stable key that no record names before overwriting them", async () => {
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			const stray = await solid(64, 48, "#808080").png().toBuffer();
++			await writeFile(join(uploads(), KEY), stray);
++
++			const service = await restart();
++			expect((await service.reconcile(settled())).mirroredStableKeys).toEqual([KEY]);
++			expect(sha(await stableBytes())).toBe(sha(optimized));
++			await expectOriginalsRecoverable([originalBytes, stray]);
++			// Recorded, so later runs keep it.
++			expect((await service.reconcile(settled())).removedOriginals).toEqual([]);
++			await expectOriginalsRecoverable([originalBytes, stray]);
++		});
++
++		it("leaves a stable key that exists but cannot be read", async () => {
++			vi.spyOn(console, "error").mockImplementation(() => undefined);
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			await db.destroy();
++			db = open();
++			const unreadable: Storage = {
++				upload: (options) => active.upload(options),
++				delete: (key) => active.delete(key),
++				exists: (key) => active.exists(key),
++				list: (options) => active.list(options),
++				getSignedUploadUrl: (options) => active.getSignedUploadUrl(options),
++				getPublicUrl: (key) => active.getPublicUrl(key),
++				download: (key) =>
++					key === KEY ? Promise.reject(new Error("input/output error")) : active.download(key),
++			};
++			const report = await build({ storage: unreadable }).reconcile(settled());
++			expect(report).toMatchObject({ mirroredStableKeys: [], pendingPublicCleanups: 1 });
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(originalBytes));
++		});
++
++		it("does not spread a damaged active revision to the stable key", async () => {
++			vi.spyOn(console, "error").mockImplementation(() => undefined);
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			await writeFile(
++				join(uploads(), "media-revisions", revisionFile(optimized)),
++				optimized.subarray(0, 40),
++			);
++			const report = await (await restart()).reconcile(settled());
++			expect(report).toMatchObject({ mirroredStableKeys: [], pendingPublicCleanups: 1 });
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(originalBytes));
++		});
++
++		it("keeps a superseded object whose bytes are not the ones retained", async () => {
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			await expect(
++				restoreTo(dyingAt("public-mirrored"), originalBytes, "restore-1"),
++			).rejects.toThrow(Died);
++			const object = join(uploads(), "media-revisions", revisionFile(optimized));
++			const damaged = optimized.subarray(0, 40);
++			await writeFile(object, damaged);
++			const report = await (await restart()).reconcile(settled());
++			expect(report.removedSupersededObjects).toEqual([]);
++			expect(Buffer.from(await readFile(object))).toEqual(Buffer.from(damaged));
++		});
++
++		it("keeps a superseded object that another operation is about to publish", async () => {
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			await expect(
++				restoreTo(dyingAt("public-mirrored"), originalBytes, "restore-1"),
++			).rejects.toThrow(Died);
++			// A restore of the optimized bytes is interrupted with its candidate staged.
++			await expect(restoreTo(dyingAt("candidate-staged"), optimized, "restore-2")).rejects.toThrow(
++				Died,
++			);
++			const service = await restart();
++			// Inside the grace period the open operation is left alone, and so is its candidate.
++			const early = await service.reconcile({ graceMs: 3_600_000 });
++			expect(early.removedSupersededObjects).toEqual([]);
++			expect(await files("uploads/media-revisions")).toContain(revisionFile(optimized));
++
++			const report = await service.reconcile(settled());
++			expect(report.operations).toEqual([
++				expect.objectContaining({ operationId: "restore-2", outcome: "published" }),
++			]);
++			await expectServed(optimized);
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(optimized)]);
++			expect(await problems()).toEqual([]);
++		});
++	});
++
++	describe("sites replaced before this cleanup existed", () => {
++		beforeEach(async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			expect((await restoreTo(service, originalBytes, "restore-1")).ok).toBe(true);
++			expect((await replaceWith(service, second, "op-2")).ok).toBe(true);
++			await asBeforeThisCleanup();
++		});
++
++		it("are cleaned by reconciliation, a bounded amount per run, until nothing is left", async () => {
++			expect(await problems()).toEqual(
++				[
++					`${KEY} does not hold the active revision of ${mediaId}`,
++					`${KEY} holds retained original ${sha(originalBytes)}`,
++					`media-revisions/${revisionFile(optimized)} holds retained original ${sha(optimized)}`,
++					`media-revisions/${revisionFile(originalBytes)} holds retained original ${sha(originalBytes)}`,
++				].toSorted(),
++			);
++			const service = await restart();
++			const runs = [];
++			for (let run = 0; run < 6; run++) {
++				const report = await service.reconcile(settled({ limit: 1 }));
++				runs.push({
++					mirrored: report.mirroredStableKeys.length,
++					removed: report.removedSupersededObjects.length,
++					complete: report.complete,
++				});
++				await expectServed(second);
++				expect(report.mirroredStableKeys.length).toBeLessThanOrEqual(1);
++				expect(report.removedSupersededObjects.length).toBeLessThanOrEqual(2);
++			}
++			// The first run cannot finish; a later one does, and the runs after it change nothing.
++			expect(runs[0]!.complete).toBe(false);
++			expect(runs.at(-1)).toEqual({ mirrored: 0, removed: 0, complete: true });
++			expect(runs.reduce((sum, run) => sum + run.mirrored, 0)).toBe(1);
++			expect(runs.reduce((sum, run) => sum + run.removed, 0)).toBe(2);
++
++			expect(await problems()).toEqual([]);
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(second));
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(second)]);
++			await expectOriginalsRecoverable([originalBytes, optimized]);
++			expect(await restoreTo(service, originalBytes, "restore-2")).toMatchObject({ ok: true });
++			await expectServed(originalBytes);
++			expect(await problems()).toEqual([]);
++		});
++
++		it("have at most the limit of superseded objects removed by one sweep", async () => {
++			// Nothing is owed by an operation, so only the sweep of revision objects removes anything.
++			await db
++				.updateTable("_emdash_media_operations")
++				.set({ public_cleaned_at: new Date().toISOString() })
++				.execute();
++			const service = await restart();
++			const first = await service.reconcile(settled({ limit: 1 }));
++			expect(first.removedSupersededObjects).toHaveLength(1);
++			expect(first.complete).toBe(false);
++			expect(await files("uploads/media-revisions")).toHaveLength(2);
++			const next = await service.reconcile(settled({ limit: 1 }));
++			expect(next.removedSupersededObjects).toHaveLength(1);
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(second)]);
++			expect(await service.reconcile(settled({ limit: 1 }))).toMatchObject({
++				removedSupersededObjects: [],
++				complete: true,
++			});
++		});
++
++		it("are cleaned in one run without a limit, whatever the age of the files", async () => {
++			// Touched just now, as a copied or restored uploads directory would be.
++			const now = new Date();
++			for (const name of await files("uploads/media-revisions"))
++				await utimes(join(uploads(), "media-revisions", name), now, now);
++			const report = await (await restart()).reconcile({ graceMs: 600_000, now: new Date() });
++			// The operations themselves were published inside the grace period, so they are left...
++			expect(report.pendingPublicCleanups).toBe(3);
++			// ...but the superseded objects are settled by the records, not by their age.
++			expect(report.removedSupersededObjects.toSorted(byName)).toEqual(
++				[
++					`media-revisions/${revisionFile(optimized)}`,
++					`media-revisions/${revisionFile(originalBytes)}`,
++				].toSorted(byName),
++			);
++			const later = await (await restart()).reconcile(settled());
++			expect(later).toMatchObject({ mirroredStableKeys: [KEY], pendingPublicCleanups: 0 });
++			expect(await problems()).toEqual([]);
++		});
++	});
++
++	describe("readers through the host", () => {
++		it("a reader that already opened a revision reads it in full after it is superseded and removed", async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			const storage = createRevisionAwareStorage(active, () => db);
++			const inFlight = await storage.download(KEY);
++			expect((await replaceWith(service, second, "op-2")).ok).toBe(true);
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(second)]);
++			const body = new Uint8Array(await new Response(inFlight.body).arrayBuffer());
++			expect(inFlight.size).toBe(optimized.byteLength);
++			expect(sha(body)).toBe(sha(optimized));
++		});
++
++		it("a reader that opened the stable key of an unreplaced item reads it in full after the key is rewritten", async () => {
++			const storage = createRevisionAwareStorage(active, () => db);
++			const inFlight = await storage.download(KEY);
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			expect(sha(await stableBytes())).toBe(sha(optimized));
++			const body = new Uint8Array(await new Response(inFlight.body).arrayBuffer());
++			expect(inFlight.size).toBe(originalBytes.byteLength);
++			expect(sha(body)).toBe(sha(originalBytes));
++		});
++
++		it("a reader that resolved a revision just before it was superseded serves the new one, never a missing file", async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			let raced = false;
++			// The replacement lands between the reader's resolution of the key and its read.
++			const racing: Storage = {
++				upload: (options) => active.upload(options),
++				delete: (key) => active.delete(key),
++				exists: (key) => active.exists(key),
++				list: (options) => active.list(options),
++				getSignedUploadUrl: (options) => active.getSignedUploadUrl(options),
++				getPublicUrl: (key) => active.getPublicUrl(key),
++				download: async (key) => {
++					if (!raced) {
++						raced = true;
++						expect(key).toBe(`media-revisions/${revisionFile(optimized)}`);
++						expect((await replaceWith(service, second, "op-2")).ok).toBe(true);
++					}
++					return active.download(key);
++				},
++			};
++			const viaStorage = await createRevisionAwareStorage(racing, () => db).download(KEY);
++			expect(sha(new Uint8Array(await new Response(viaStorage.body).arrayBuffer()))).toBe(
++				sha(second),
++			);
++
++			raced = false;
++			let restored = false;
++			const racingRestore: Storage = {
++				...racing,
++				download: async (key) => {
++					if (!restored) {
++						restored = true;
++						expect((await restoreTo(service, optimized, "restore-1")).ok).toBe(true);
++					}
++					return active.download(key);
++				},
++			};
++			const response = await served(KEY, racingRestore);
++			expect(response.status).toBe(200);
++			expect(response.length).toBe(String(optimized.byteLength));
++			expect(sha(response.bytes!)).toBe(sha(optimized));
++		});
++
++		it("reports a stable key as existing across a supersession", async () => {
++			const service = build();
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			let raced = false;
++			const racing: Storage = {
++				upload: (options) => active.upload(options),
++				delete: (key) => active.delete(key),
++				download: (key) => active.download(key),
++				list: (options) => active.list(options),
++				getSignedUploadUrl: (options) => active.getSignedUploadUrl(options),
++				getPublicUrl: (key) => active.getPublicUrl(key),
++				exists: async (key) => {
++					if (!raced) {
++						raced = true;
++						expect((await replaceWith(service, second, "op-2")).ok).toBe(true);
++					}
++					return active.exists(key);
++				},
++			};
++			expect(await createRevisionAwareStorage(racing, () => db).exists(KEY)).toBe(true);
++		});
++
++		it("still refuses revision and original keys on the public route, and a missing key is not found", async () => {
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			expect((await served(`media-revisions/${revisionFile(optimized)}`)).status).toBe(404);
++			expect((await served(`media-originals/${sha(originalBytes)}`)).status).toBe(404);
++			expect((await served("01HZMISSING.png")).status).toBe(404);
++		});
++	});
++
++	describe("the stable key", () => {
++		it("is replaced by rename: a new file takes the name, and no temporary file is left", async () => {
++			const before = await stat(join(uploads(), KEY));
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			const after = await stat(join(uploads(), KEY));
++			expect(after.ino).not.toBe(before.ino);
++			expect(after.size).toBe(optimized.byteLength);
++			expect(await files("uploads")).toEqual([KEY, "media-revisions"]);
++			expect(await files("uploads/media-revisions")).toEqual([revisionFile(optimized)]);
++		});
++
++		it("temporary files of an interrupted rewrite are removed by reconciliation once stale, and never listed as revisions", async () => {
++			await mkdir(join(uploads(), "media-revisions"), { recursive: true });
++			const temporary = join(uploads(), "media-revisions", "stable-interrupted.tmp");
++			await writeFile(temporary, optimized);
++			const service = build();
++			const early = await service.reconcile();
++			expect(early).toMatchObject({ removedTemporaryFiles: 0, removedCandidateObjects: [] });
++			expect(await files("uploads/media-revisions")).toEqual(["stable-interrupted.tmp"]);
++			expect((await service.reconcile(settled())).removedTemporaryFiles).toBe(1);
++			expect(await files("uploads/media-revisions")).toEqual([]);
++		});
++
++		it("refuses a key outside the storage directory and leaves no temporary file after a failed write", async () => {
++			const writer = createLocalStableKeyWriter(uploads());
++			await expect(writer.write("../escape.png", optimized)).rejects.toThrow();
++			await expect(writer.write("missing-directory/file.png", optimized)).rejects.toThrow();
++			expect(await files("uploads/media-revisions")).toEqual([]);
++			expect(await files("")).not.toContain("escape.png");
++		});
++
++		it("is not recreated for media deleted while its rewrite was in progress", async () => {
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			const local = createLocalStableKeyWriter(uploads());
++			const storage = createRevisionAwareStorage(active, () => db);
++			const deleting: StableKeyWriter = {
++				removeTemporaryFiles: (before) => local.removeTemporaryFiles(before),
++				// The deletion completes, stable key included, just before the rewrite lands.
++				write: async (key, bytes) => {
++					expect(await handleMediaDelete(db, mediaId, storage)).toMatchObject({ success: true });
++					await local.write(key, bytes);
++				},
++			};
++			const report = await build({ stableKeys: deleting }).reconcile(settled());
++			expect(report).toMatchObject({ mirroredStableKeys: [], pendingPublicCleanups: 0 });
++			expect(await files("uploads")).toEqual(["media-revisions"]);
++			expect((await served()).status).toBe(404);
++		});
++
++		it("is not rewritten for media deleted before its cleanup ran", async () => {
++			await expect(replaceWith(dyingAt("published"), optimized, "op-1")).rejects.toThrow(Died);
++			await handleMediaDelete(
++				db,
++				mediaId,
++				createRevisionAwareStorage(active, () => db),
++			);
++			const report = await (await restart()).reconcile(settled());
++			expect(report).toMatchObject({ mirroredStableKeys: [], pendingPublicCleanups: 0 });
++			expect(await files("uploads")).toEqual(["media-revisions"]);
++		});
++
++		it("is left alone when another media row uses the same key", async () => {
++			const other = await new MediaRepository(db).create({
++				filename: "same.png",
++				mimeType: "image/png",
++				size: originalBytes.byteLength,
++				width: 64,
++				height: 48,
++				storageKey: KEY,
++				contentHash: await computeContentHash(originalBytes),
++				status: "ready",
++			});
++			expect((await replaceWith(build(), optimized, "op-1")).ok).toBe(true);
++			// The key is still the other row's only object.
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(originalBytes));
++			expect(other.id).not.toBe(mediaId);
++			expect(await problems()).toEqual([]);
++			expect(await build().reconcile(settled())).toMatchObject({
++				mirroredStableKeys: [],
++				pendingPublicCleanups: 0,
++			});
++		});
++
++		it("is written with the storage's own upload when no atomic writer is configured", async () => {
++			const service = createMediaReplacementService({
++				db,
++				storage: active,
++				originals: createPrivateOriginalStore(privateStorage()),
++				validator: createOutputValidator({ decoder: inProcessDecoder }),
++			});
++			expect((await replaceWith(service, optimized, "op-1")).ok).toBe(true);
++			expect(Buffer.from(await stableBytes())).toEqual(Buffer.from(optimized));
++			expect(await problems()).toEqual([]);
++		});
++	});
++});
+diff --git a/packages/core/tests/unit/media/safe/public-scan.ts b/packages/core/tests/unit/media/safe/public-scan.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9ff1dfd53a7600b755f83826b4caaa46a33a8cb
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/public-scan.ts
+@@ -0,0 +1,77 @@
++import { createHash } from "node:crypto";
++import { readdir, readFile } from "node:fs/promises";
++import { join } from "node:path";
++
++import type { Kysely } from "kysely";
++
++import type { Database } from "../../../../src/database/types.js";
++
++async function walk(directory: string, prefix = ""): Promise<string[]> {
++	const keys: string[] = [];
++	for (const entry of await readdir(join(directory, prefix), { withFileTypes: true })) {
++		const key = prefix ? `${prefix}/${entry.name}` : entry.name;
++		if (entry.isDirectory()) keys.push(...(await walk(directory, key)));
++		else keys.push(key);
++	}
++	return keys;
++}
++
++/**
++ * Scan every file of the public storage directory, as a file server mounted on
++ * it would expose them, and report what must not be there once publication and
++ * cleanup are complete:
++ *
++ * - a file whose digest is a retained original, unless it is the active
++ *   revision of a media item (at that revision's object key or at the item's
++ *   stable key);
++ * - a managed media item whose stable key does not hold its active revision.
++ */
++export async function publicStorageProblems(
++	db: Kysely<Database>,
++	uploadsDirectory: string,
++): Promise<string[]> {
++	const retained = new Set(
++		(await db.selectFrom("_emdash_media_originals").select("sha256").execute()).map(
++			(row) => row.sha256,
++		),
++	);
++	const media = await db
++		.selectFrom("media")
++		.leftJoin("_emdash_media_revisions", "_emdash_media_revisions.id", "media.revision_id")
++		.select([
++			"media.id",
++			"media.storage_key",
++			"_emdash_media_revisions.object_key",
++			"_emdash_media_revisions.sha256",
++		])
++		.execute();
++
++	/** Per key, the digests it may hold; `null` allows any (the item's bytes live only there). */
++	const allowed = new Map<string, Set<string | null>>();
++	const allow = (key: string, sha256: string | null) =>
++		allowed.set(key, (allowed.get(key) ?? new Set()).add(sha256));
++	for (const item of media) {
++		const inPlace = item.object_key === null || item.object_key === item.storage_key;
++		allow(item.storage_key, inPlace ? null : item.sha256);
++		if (!inPlace && item.object_key) allow(item.object_key, item.sha256);
++	}
++
++	const problems: string[] = [];
++	const digests = new Map<string, string>();
++	for (const key of await walk(uploadsDirectory)) {
++		const digest = createHash("sha256")
++			.update(await readFile(join(uploadsDirectory, key)))
++			.digest("hex");
++		digests.set(key, digest);
++		const may = allowed.get(key);
++		if (retained.has(digest) && !may?.has(null) && !may?.has(digest))
++			problems.push(`${key} holds retained original ${digest}`);
++	}
++	for (const item of media) {
++		if (item.object_key === null || item.object_key === item.storage_key) continue;
++		if (media.filter((other) => other.storage_key === item.storage_key).length > 1) continue;
++		if (digests.get(item.storage_key) !== item.sha256)
++			problems.push(`${item.storage_key} does not hold the active revision of ${item.id}`);
++	}
++	return problems.toSorted();
++}
+diff --git a/packages/core/tests/unit/media/safe/reconciliation.test.ts b/packages/core/tests/unit/media/safe/reconciliation.test.ts
+index 869a4c3050aec42636412831ebb44f4ea3ea8550..3a41f441993a49765d6fee054bac9f8ac6e70974 100644
+--- a/packages/core/tests/unit/media/safe/reconciliation.test.ts
++++ b/packages/core/tests/unit/media/safe/reconciliation.test.ts
+@@ -15,6 +15,7 @@ import type { Database } from "../../../../src/database/types.js";
+ import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
+ import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
+ import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { createLocalStableKeyWriter } from "../../../../src/media/safe/public-local.js";
+ import type { ReconciliationReport } from "../../../../src/media/safe/reconciliation.js";
+ import type { ReplacementStep } from "../../../../src/media/safe/replacement-service.js";
+ import { createMediaReplacementService } from "../../../../src/media/safe/replacement-service.js";
+@@ -24,6 +25,7 @@ import { LocalStorage } from "../../../../src/storage/local.js";
+ import type { Storage } from "../../../../src/storage/types.js";
+ import { computeContentHash } from "../../../../src/utils/hash.js";
+ import { inProcessDecoder, noisy, solid } from "./output-fixtures.js";
++import { publicStorageProblems } from "./public-scan.js";
+ 
+ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+ const KEY = "01HZRECONCILE.png";
+@@ -41,6 +43,9 @@ const OUTCOMES: Array<[ReplacementStep, "aborted" | "published" | "none"]> = [
+ 	["original-retained", "published"],
+ 	["publish-prepared", "published"],
+ 	["published", "none"],
++	["public-mirrored", "none"],
++	["public-superseded-removed", "none"],
++	["public-cleaned", "none"],
+ ];
+ 
+ describe("safe media reconciliation", () => {
+@@ -67,6 +72,7 @@ describe("safe media reconciliation", () => {
+ 			db,
+ 			storage: active,
+ 			originals: createPrivateOriginalStore(privateStorage()),
++			stableKeys: createLocalStableKeyWriter(join(root, "uploads")),
+ 			validator: createOutputValidator({ decoder: inProcessDecoder }),
+ 			onStep: onStep ? (step) => onStep(step) : undefined,
+ 		});
+@@ -115,7 +121,9 @@ describe("safe media reconciliation", () => {
+ 	/**
+ 	 * The media item is one complete, readable revision: the served bytes are the
+ 	 * active revision's object, they match its digest, and the row's byte-derived
+-	 * columns describe them. Every object a record needs exists and verifies.
++	 * columns describe them. The object of every active revision verifies, every
++	 * recorded original verifies in the private store, and the public storage holds
++	 * no retained original that is not active and no stable key behind its item.
+ 	 */
+ 	async function expectConsistent(): Promise<Uint8Array> {
+ 		const row = await mediaRow();
+@@ -138,7 +146,7 @@ describe("safe media reconciliation", () => {
+ 		expect(await openOperations()).toEqual([]);
+ 		const repo = new MediaOperationsRepository(db);
+ 		for (const each of await db.selectFrom("_emdash_media_revisions").selectAll().execute()) {
+-			if (!(await repo.isRevisionObjectInUse(each.object_key))) continue;
++			if (!(await repo.isRevisionObjectActive(each.object_key))) continue;
+ 			const bytes = new Uint8Array(await readFile(join(root, "uploads", each.object_key)));
+ 			if (each.sha256) expect(sha(bytes), each.object_key).toBe(each.sha256);
+ 		}
+@@ -146,6 +154,7 @@ describe("safe media reconciliation", () => {
+ 		for (const original of await db.selectFrom("_emdash_media_originals").selectAll().execute()) {
+ 			expect(sha(await store.read(original.sha256))).toBe(original.sha256);
+ 		}
++		expect(await publicStorageProblems(db, join(root, "uploads"))).toEqual([]);
+ 		return object;
+ 	}
+ 
+@@ -212,7 +221,13 @@ describe("safe media reconciliation", () => {
+ 				expect(await files("private/media-originals")).toEqual(
+ 					published ? [sha(originalBytes)] : [],
+ 				);
+-				expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++				// The stable key holds the active revision, whatever reads it.
++				expect(await readFile(join(root, "uploads", KEY))).toEqual(
++					Buffer.from(published ? optimized : originalBytes),
++				);
++				// Only an interruption between the commit and the rewrite leaves it to reconciliation.
++				expect(report.mirroredStableKeys).toEqual(step === "published" ? [KEY] : []);
++				expect(report.pendingPublicCleanups).toBe(0);
+ 
+ 				// The caller's retry gets the durable outcome; nothing is published twice.
+ 				const retry = await service.replace(request());
+@@ -222,6 +237,9 @@ describe("safe media reconciliation", () => {
+ 				expect(again.operations).toEqual([]);
+ 				expect(again.removedCandidateObjects).toEqual([]);
+ 				expect(again.removedOriginals).toEqual([]);
++				expect(again.mirroredStableKeys).toEqual([]);
++				expect(again.removedSupersededObjects).toEqual([]);
++				expect(again.pendingPublicCleanups).toBe(0);
+ 				// A new operation works normally afterwards.
+ 				if (!published) {
+ 					expect((await service.replace(request({ operationId: "op-2" }))).ok).toBe(true);
+@@ -236,8 +254,12 @@ describe("safe media reconciliation", () => {
+ 				"original-retained",
+ 				"publish-prepared",
+ 				"published",
++				"public-mirrored",
++				"public-superseded-removed",
++				"public-cleaned",
+ 			] as const) {
+ 				await db.deleteFrom("_emdash_media_operations").execute();
++				await writeFile(join(root, "uploads", KEY), originalBytes);
+ 				// Back to the baseline, as if this iteration were the first.
+ 				await db
+ 					.updateTable("media")
+@@ -258,7 +280,7 @@ describe("safe media reconciliation", () => {
+ 				const report = await dying.reconcile(settled());
+ 				expect(report.operations[0], second).toMatchObject({ outcome: "failed" });
+ 				expect(sha((await served()).bytes!), second).toBe(
+-					sha(second === "published" ? optimized : originalBytes),
++					sha(second === "published" || second.startsWith("public-") ? optimized : originalBytes),
+ 				);
+ 
+ 				const service = await restart();
+@@ -348,9 +370,9 @@ describe("safe media reconciliation", () => {
+ 	});
+ 
+ 	describe("orphan cleanup", () => {
+-		it("removes only objects no record needs, and never an active, superseded or source object", async () => {
++		it("removes only objects no record needs, and never an active object or unretained bytes", async () => {
+ 			const service = build();
+-			// Published, then superseded by a second replacement: both revision objects are kept.
++			// Published, then superseded by a second replacement: the first object goes once retained.
+ 			expect((await service.replace(request())).ok).toBe(true);
+ 			const second = await solid(64, 48, "#e02060").png().toBuffer();
+ 			const current = (await service.getSourceRevision(mediaId))!;
+@@ -412,10 +434,12 @@ describe("safe media reconciliation", () => {
+ 			expect(await files("uploads/media-revisions")).toEqual(
+ 				before.filter((name) => name !== strayCandidate && name !== `${sha(lost)}.png`),
+ 			);
++			// The superseded revision's object was removed when it was superseded; its bytes are private.
++			expect(report.removedSupersededObjects).toEqual([]);
+ 			expect(await files("uploads/media-revisions")).toEqual(
+-				[`${sha(optimized)}.png`, `${sha(second)}.png`, "notes.txt"].toSorted(byName),
++				[`${sha(optimized)}.png`, "notes.txt"].toSorted(byName),
+ 			);
+-			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(optimized));
+ 			expect(await files("uploads")).toContain("unrelated.png");
+ 			expect(await files("private/media-originals")).toEqual(
+ 				[sha(originalBytes), sha(optimized), sha(second)].toSorted(byName),
+diff --git a/packages/core/tests/unit/media/safe/replacement-service.test.ts b/packages/core/tests/unit/media/safe/replacement-service.test.ts
+index d6f236c41a33432b38c71d73ad09e59a35e13c02..219f02c9965a5b804e4699b2f6643ecb1558b30b 100644
+--- a/packages/core/tests/unit/media/safe/replacement-service.test.ts
++++ b/packages/core/tests/unit/media/safe/replacement-service.test.ts
+@@ -16,6 +16,7 @@ import type { FullImageDecoder } from "../../../../src/media/safe/decoder.js";
+ import { ImageDecodeError } from "../../../../src/media/safe/decoder.js";
+ import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
+ import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { createLocalStableKeyWriter } from "../../../../src/media/safe/public-local.js";
+ import type { ReplacementStep } from "../../../../src/media/safe/replacement-service.js";
+ import { createMediaReplacementService } from "../../../../src/media/safe/replacement-service.js";
+ import { createOutputValidator } from "../../../../src/media/safe/validate-output.js";
+@@ -32,7 +33,12 @@ const STEPS: ReplacementStep[] = [
+ 	"original-retained",
+ 	"publish-prepared",
+ 	"published",
++	"public-mirrored",
++	"public-superseded-removed",
++	"public-cleaned",
+ ];
++/** The commit has happened: readers serve the new revision whatever happens to the cleanup. */
++const committed = (step: ReplacementStep) => step === "published" || step.startsWith("public-");
+ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+ const KEY = "01HZSTABLEKEY.png";
+ 
+@@ -78,6 +84,7 @@ describe("media replacement service", () => {
+ 			db,
+ 			storage: active,
+ 			originals: createPrivateOriginalStore(guarded),
++			stableKeys: createLocalStableKeyWriter(join(root, "uploads")),
+ 			validator: createOutputValidator({
+ 				decoder: { decode: (bytes, request) => decoder.decode(bytes, request) },
+ 				admission,
+@@ -238,9 +245,9 @@ describe("media replacement service", () => {
+ 			expect((await served(`media-originals/${sha(originalBytes)}`)).status).toBe(404);
+ 		});
+ 
+-		it("keeps the superseded object, retains the exact original privately and records both digests", async () => {
++		it("rewrites the stable key with the published bytes, retains the exact original privately and records both digests", async () => {
+ 			await build().replace(request());
+-			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(optimized));
+ 			expect(await files("uploads/media-revisions")).toEqual([`${sha(optimized)}.png`]);
+ 			expect(await readFile(join(root, "private", "media-originals", sha(originalBytes)))).toEqual(
+ 				Buffer.from(originalBytes),
+@@ -326,11 +333,11 @@ describe("media replacement service", () => {
+ 
+ 				// A restarted host always serves one complete revision.
+ 				const during = (await served()).bytes!;
+-				expect(sha(during)).toBe(sha(step === "published" ? optimized : originalBytes));
++				expect(sha(during)).toBe(sha(committed(step) ? optimized : originalBytes));
+ 
+ 				const service = await restart();
+ 				const result = await service.replace(request());
+-				expect(result).toMatchObject({ ok: true, replayed: step === "published" });
++				expect(result).toMatchObject({ ok: true, replayed: committed(step) });
+ 				expect(sha((await served()).bytes!)).toBe(sha(optimized));
+ 				expect(await count("_emdash_media_operations")).toBe(1);
+ 				expect(await count("_emdash_media_originals")).toBe(1);
+diff --git a/packages/core/tests/unit/media/safe/restore.test.ts b/packages/core/tests/unit/media/safe/restore.test.ts
+index ef1e52bb3ac0a79b794c9ed20def143c9d3cb23e..0b779ad0040e2a5c49633396abdc52878edd2c3e 100644
+--- a/packages/core/tests/unit/media/safe/restore.test.ts
++++ b/packages/core/tests/unit/media/safe/restore.test.ts
+@@ -14,6 +14,7 @@ import type { Database } from "../../../../src/database/types.js";
+ import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
+ import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
+ import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import { createLocalStableKeyWriter } from "../../../../src/media/safe/public-local.js";
+ import {
+ 	openSafeMediaRecovery,
+ 	SafeMediaRecoveryError,
+@@ -27,6 +28,7 @@ import { createOutputValidator } from "../../../../src/media/safe/validate-outpu
+ import { LocalStorage } from "../../../../src/storage/local.js";
+ import { computeContentHash } from "../../../../src/utils/hash.js";
+ import { inProcessDecoder, noisy, solid } from "./output-fixtures.js";
++import { publicStorageProblems } from "./public-scan.js";
+ 
+ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+ const KEY = "01HZRESTORE.png";
+@@ -38,7 +40,12 @@ const STEPS: ReplacementStep[] = [
+ 	"original-retained",
+ 	"publish-prepared",
+ 	"published",
++	"public-mirrored",
++	"public-superseded-removed",
++	"public-cleaned",
+ ];
++/** The commit has happened: readers serve the new revision whatever happens to the cleanup. */
++const committed = (step: ReplacementStep) => step === "published" || step.startsWith("public-");
+ 
+ class Died extends Error {}
+ 
+@@ -69,6 +76,7 @@ describe("byte-exact restore", () => {
+ 			db,
+ 			storage: active,
+ 			originals: originalsStore(),
++			stableKeys: createLocalStableKeyWriter(join(root, "uploads")),
+ 			validator: createOutputValidator({ decoder: inProcessDecoder }),
+ 			onStep: onStep ? (step) => onStep(step) : undefined,
+ 		});
+@@ -496,15 +504,12 @@ describe("byte-exact restore", () => {
+ 						if (current === step) throw new Died(step);
+ 					}).restore(restoreRequest()),
+ 				).rejects.toThrow(Died);
+-				expect(sha((await served())!)).toBe(sha(step === "published" ? originalBytes : optimized));
++				expect(sha((await served())!)).toBe(sha(committed(step) ? originalBytes : optimized));
+ 
+ 				const service = await restart();
+ 				const report = await service.reconcile({ graceMs: 0, now: new Date(Date.now() + 60_000) });
+-				const completedByReconciliation = ![
+-					"intent-recorded",
+-					"candidate-object-written",
+-					"published",
+-				].includes(step);
++				const completedByReconciliation =
++					!["intent-recorded", "candidate-object-written"].includes(step) && !committed(step);
+ 				if (completedByReconciliation)
+ 					expect(report.operations).toEqual([
+ 						expect.objectContaining({ kind: "restore", outcome: "published" }),
+@@ -524,11 +529,9 @@ describe("byte-exact restore", () => {
+ 				expect(await files("private/media-originals")).toEqual(
+ 					[sha(originalBytes), sha(optimized)].toSorted((a, b) => a.localeCompare(b)),
+ 				);
+-				expect(await files("uploads/media-revisions")).toEqual(
+-					[`${sha(originalBytes)}.png`, `${sha(optimized)}.png`].toSorted((a, b) =>
+-						a.localeCompare(b),
+-					),
+-				);
++				// The restored revision is the only public object; the bytes it replaced are private.
++				expect(await files("uploads/media-revisions")).toEqual([`${sha(originalBytes)}.png`]);
++				expect(await publicStorageProblems(db, join(root, "uploads"))).toEqual([]);
+ 			});
+ 
+ 			it(`after ${step}: resuming with the same ID without reconciliation publishes exactly once`, async () => {
+@@ -540,7 +543,7 @@ describe("byte-exact restore", () => {
+ 				const service = await restart();
+ 				expect(await service.restore(restoreRequest())).toMatchObject({
+ 					ok: true,
+-					replayed: step === "published",
++					replayed: committed(step),
+ 				});
+ 				await expectServing(originalBytes);
+ 				expect(await count("_emdash_media_operations")).toBe(2);
+diff --git a/packages/core/tests/unit/media/safe/safe-media-integration.test.ts b/packages/core/tests/unit/media/safe/safe-media-integration.test.ts
+index 23f79ee9e1e58d60e08932748cd106dfc11c3b24..7728a69883327160780f3e17a2f0003c69c7d37e 100644
+--- a/packages/core/tests/unit/media/safe/safe-media-integration.test.ts
++++ b/packages/core/tests/unit/media/safe/safe-media-integration.test.ts
+@@ -1,5 +1,5 @@
+ import { createHash } from "node:crypto";
+-import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
++import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ 
+@@ -231,7 +231,7 @@ describe("safe media integration", () => {
+ 			expect(await readFile(join(root, "private", "media-originals", sha(originalBytes)))).toEqual(
+ 				Buffer.from(originalBytes),
+ 			);
+-			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(bigger));
+ 		});
+ 
+ 		it("keeps the focal point when the new image has the same dimensions", async () => {
+@@ -346,11 +346,19 @@ describe("safe media integration", () => {
+ 			).toBeDefined();
+ 		});
+ 
+-		it("is a real control: a reader holding the undecorated storage would serve the superseded bytes", async () => {
++		it("is a real control: while the stable key lags the pointer, only the decorated storage serves the active revision", async () => {
+ 			const bytes = await solid(64, 48, "#2060e0").png().toBuffer();
+ 			expect((await putReplacement(bytes)).status).toBe(200);
+-			const stale = await hashStoredObject(raw, KEY);
+-			expect(stale).toEqual({ sha256: sha(originalBytes), bytes: originalBytes.byteLength });
++			const active = { sha256: sha(bytes), bytes: bytes.byteLength };
++			// Once published and cleaned up, the stable key holds the active revision as well.
++			expect(await hashStoredObject(raw, KEY)).toEqual(active);
++			// As between the commit and the rewrite of the stable key.
++			await writeFile(join(root, "uploads", KEY), originalBytes);
++			expect(await hashStoredObject(raw, KEY)).toEqual({
++				sha256: sha(originalBytes),
++				bytes: originalBytes.byteLength,
++			});
++			expect(await hashStoredObject(safe.storage, KEY)).toEqual(active);
+ 		});
+ 
+ 		it("serves unmanaged media and other keys exactly as before", async () => {
+diff --git a/packages/core/tests/unit/storage/local.test.ts b/packages/core/tests/unit/storage/local.test.ts
+index 14d2f1033ab8427037620292a742154c04a081e8..d27ea13e25f18cab115072865ec8ff487433670e 100644
+--- a/packages/core/tests/unit/storage/local.test.ts
++++ b/packages/core/tests/unit/storage/local.test.ts
+@@ -1,3 +1,4 @@
++import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+ import { mkdtemp, rm } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+@@ -35,3 +36,52 @@ describe("LocalStorage same-key upload", () => {
+ 		);
+ 	});
+ });
++
++describe("LocalStorage download", () => {
++	let directory: string | undefined;
++
++	afterEach(async () => {
++		if (directory) await rm(directory, { recursive: true, force: true });
++	});
++
++	async function stored(bytes: Uint8Array) {
++		directory = await mkdtemp(join(tmpdir(), "emdash-local-storage-"));
++		const storage = new LocalStorage({ directory, baseUrl: "/media" });
++		await storage.upload({ key: "photo.png", body: bytes, contentType: "image/png" });
++		return storage;
++	}
++
++	it("reads the file it reported, in full, when the key is removed before the body is read", async () => {
++		const storage = await stored(new Uint8Array([1, 2, 3, 4]));
++		const result = await storage.download("photo.png");
++		unlinkSync(join(directory!, "photo.png"));
++		expect(result.size).toBe(4);
++		expect(new Uint8Array(await new Response(result.body).arrayBuffer())).toEqual(
++			new Uint8Array([1, 2, 3, 4]),
++		);
++		await expect(storage.download("photo.png")).rejects.toMatchObject({ code: "NOT_FOUND" });
++	});
++
++	it("reads the file it reported, in full, when another file is renamed onto the key before the body is read", async () => {
++		const storage = await stored(new Uint8Array([1, 2, 3, 4]));
++		const result = await storage.download("photo.png");
++		writeFileSync(join(directory!, "next"), new Uint8Array([9, 8]));
++		renameSync(join(directory!, "next"), join(directory!, "photo.png"));
++		expect(result.size).toBe(4);
++		expect(new Uint8Array(await new Response(result.body).arrayBuffer())).toEqual(
++			new Uint8Array([1, 2, 3, 4]),
++		);
++	});
++
++	it("reports a missing key and a directory as not found", async () => {
++		const storage = await stored(new Uint8Array([1]));
++		await storage.upload({
++			key: "nested/inner.png",
++			body: new Uint8Array([1]),
++			contentType: "image/png",
++		});
++		await expect(storage.download("absent.png")).rejects.toMatchObject({ code: "NOT_FOUND" });
++		await expect(storage.download("nested")).rejects.toMatchObject({ code: "NOT_FOUND" });
++		await expect(storage.download("photo.png/inner")).rejects.toMatchObject({ code: "NOT_FOUND" });
++	});
++});
