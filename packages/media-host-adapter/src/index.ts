@@ -42,10 +42,18 @@ export class UnsupportedMediaHostError extends Error {
 export const KNOWN_PROTOCOLS: readonly number[] = Object.freeze([1]);
 
 /**
- * Host profiles on which apply and restore have passed qualification. None has
- * yet, so every host stays read-only.
+ * Host profiles on which apply and restore have passed qualification. A host
+ * must report exactly one of these, field for field; anything else stays
+ * read-only.
+ *
+ * The one profile is a Node process with SQLite and local file storage whose
+ * safe-media locks live in that process: one process per site. It was
+ * exercised on the patched EmDash host as a pilot (one VPS, generated
+ * fixtures); see the image optimizer's README for what the run covered.
  */
-export const QUALIFIED_HOST_PROFILES: readonly HostProfile[] = Object.freeze([]);
+export const QUALIFIED_HOST_PROFILES: readonly HostProfile[] = Object.freeze([
+  Object.freeze({ runtime: 'node', database: 'sqlite', storage: 'local', locks: 'in-process' }),
+]);
 
 /**
  * The host's discovery and operations, injected by the caller. `discover`

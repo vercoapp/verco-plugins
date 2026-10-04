@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createMediaHostAdapter,
+  QUALIFIED_HOST_PROFILES,
   UnsupportedMediaHostError,
 } from '../src/index.ts';
 
@@ -47,11 +48,11 @@ test('host claims and malformed discovery cannot enable unqualified mutation', a
   }
 });
 
-test('mutation guard works without calling discovery first', async () => {
+test('with an empty qualified list the mutation guard refuses without calling discovery', async () => {
   let calls = 0;
   const adapter = createMediaHostAdapter({
     discover: async () => { calls++; return { supported: true }; },
-  });
+  }, { qualifiedProfiles: [] });
   await assert.rejects(adapter.apply(), UnsupportedMediaHostError);
   await assert.rejects(adapter.restore(), UnsupportedMediaHostError);
   assert.equal(calls, 0);
@@ -72,15 +73,61 @@ function recordingHost(discovered) {
   };
 }
 
-test('nothing is qualified by default, so a real host description stays read-only', async () => {
+test('with an empty qualified list a real host description stays read-only', async () => {
   const { host, calls } = recordingHost(support());
-  const adapter = createMediaHostAdapter(host);
+  const adapter = createMediaHostAdapter(host, { qualifiedProfiles: [] });
   const status = await adapter.availability();
   assert.equal(status.apply, false);
   assert.equal(status.reason, 'unqualified-host');
   await assert.rejects(adapter.apply({}), UnsupportedMediaHostError);
   await assert.rejects(adapter.restore({}), UnsupportedMediaHostError);
   assert.deepEqual([calls.apply.length, calls.restore.length], [0, 0]);
+});
+
+test('the default list is exactly the one qualified profile, and cannot be changed', () => {
+  assert.deepEqual(QUALIFIED_HOST_PROFILES, [LOCAL]);
+  assert.ok(Object.isFrozen(QUALIFIED_HOST_PROFILES));
+  assert.ok(QUALIFIED_HOST_PROFILES.every((profile) => Object.isFrozen(profile)));
+});
+
+test('by default the qualified profile, reported exactly, enables apply and restore', async () => {
+  const { host, calls } = recordingHost(support());
+  const adapter = createMediaHostAdapter(host);
+  const status = await adapter.availability();
+  assert.equal(status.apply, true);
+  assert.equal(status.restore, true);
+  assert.equal(status.reason, 'qualified-host');
+  assert.deepEqual(status.profile, LOCAL);
+  assert.deepEqual(await adapter.apply({ id: 'a' }), { ok: true, receipt: 'applied' });
+  assert.deepEqual(await adapter.restore({ id: 'r' }), { ok: true, receipt: 'restored' });
+  assert.deepEqual([calls.apply.length, calls.restore.length], [1, 1]);
+});
+
+test('by default every other profile stays read-only: a different, missing or extra field', async () => {
+  for (const profile of [
+    { ...LOCAL, storage: 's3' },
+    { ...LOCAL, storage: 'r2' },
+    { ...LOCAL, database: 'd1' },
+    { ...LOCAL, database: 'postgres' },
+    { ...LOCAL, runtime: 'workerd' },
+    { ...LOCAL, locks: 'distributed' },
+    { runtime: 'node', database: 'sqlite', storage: 'local' },
+    { ...LOCAL, replicas: 'many' },
+    { ...LOCAL, storage: 'Local' },
+  ]) {
+    const { host, calls } = recordingHost(support({ profile }));
+    const adapter = createMediaHostAdapter(host);
+    const status = await adapter.availability();
+    assert.equal(status.apply, false, JSON.stringify(profile));
+    assert.equal(status.restore, false, JSON.stringify(profile));
+    assert.equal(status.reason, 'unqualified-host');
+    await assert.rejects(adapter.apply({}), (error) => error.reason === 'unqualified-host');
+    await assert.rejects(adapter.restore({}), (error) => error.reason === 'unqualified-host');
+    assert.deepEqual([calls.apply.length, calls.restore.length], [0, 0]);
+  }
+  // The qualified profile on a protocol this adapter does not know stays read-only too.
+  const { host } = recordingHost(support({ protocol: 2 }));
+  assert.equal((await createMediaHostAdapter(host).availability()).reason, 'unknown-protocol');
 });
 
 test('a known protocol on an injected qualified profile enables apply and restore', async () => {

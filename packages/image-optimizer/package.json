@@ -12,13 +12,17 @@
   "homepage": "https://github.com/vercoapp/verco-plugins/tree/main/packages/image-optimizer#readme",
   "bugs": "https://github.com/vercoapp/verco-plugins/issues",
   "type": "module",
-  "main": "dist/index.mjs",
+  "main": "dist/native.mjs",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "types": "./dist/index.d.mts"
+      "types": "./dist/native.d.ts",
+      "import": "./dist/native.mjs"
     },
-    "./sandbox": "./dist/plugin.mjs"
+    "./sandbox": "./dist/plugin.mjs",
+    "./descriptor": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
   },
   "files": [
     "dist",
@@ -26,22 +30,30 @@
   ],
   "scripts": {
     "validate": "emdash-plugin validate",
-    "build": "emdash-plugin build",
+    "build": "emdash-plugin build && vite build -c vite.native.config.ts && tsc -p tsconfig.native.json && mv dist/types/image-optimizer/src/native.d.ts dist/native.d.ts && rm -r dist/types",
     "dev": "emdash-plugin dev",
     "typecheck": "tsc --noEmit",
     "test": "emdash-plugin validate && vitest run && vitest run --config vitest.host-rejection.config.ts",
     "bundle": "emdash-plugin bundle",
     "calibrate": "node --experimental-strip-types calibration/calibrate.mjs",
-    "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs"
+    "calibrate:fetch-kodak": "node calibration/fetch-kodak.mjs",
+    "qualify:site": "node qualification/qualify-site.mjs"
   },
   "peerDependencies": {
-    "emdash": ">=1.1.0"
+    "emdash": ">=1.1.0",
+    "sharp": "^0.35.4"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.3.5",
     "@emdash-cms/blocks": "1.1.0",
     "@emdash-cms/plugin-cli": "0.13.2",
     "@emdash-cms/plugin-test": "0.2.7",
+    "@types/node": "26.6.4",
     "emdash": "1.1.0",
     "sharp": "0.35.4",
     "typescript": "5.9.3",

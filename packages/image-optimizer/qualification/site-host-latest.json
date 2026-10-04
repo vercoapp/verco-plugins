@@ -1,0 +1,1260 @@
+{
+  "timestamp": "2026-10-03T22:22:39.477Z",
+  "node": "v22.16.0",
+  "hardware": {
+    "cpuModel": "AMD EPYC 9J45 128-Core Processor",
+    "visibleCpus": 4,
+    "totalMemoryBytes": 8332910592,
+    "platform": "linux x64"
+  },
+  "source": {
+    "commit": "d17f72f5a6e9cf8a18daf800931b645317087d61",
+    "uncommittedChanges": 0
+  },
+  "profile": {
+    "runtime": "node",
+    "database": "sqlite",
+    "storage": "local",
+    "locks": "in-process",
+    "status": "on the adapter qualified list: apply and restore allowed with no option set"
+  },
+  "proxy": null,
+  "publicStorage": {
+    "cleanupBoundMs": 5000,
+    "reconciliationBoundMs": 720000,
+    "staticMount": null,
+    "checks": [
+      {
+        "after": "upload",
+        "filesScanned": 11,
+        "managedMedia": 0,
+        "revisionObjects": 0,
+        "retainedOriginals": 0,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "first apply",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 1,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "restore",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 2,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "second apply",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 2,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "re-optimize",
+        "filesScanned": 15,
+        "managedMedia": 1,
+        "revisionObjects": 1,
+        "retainedOriginals": 2,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "bulk apply",
+        "filesScanned": 18,
+        "managedMedia": 4,
+        "revisionObjects": 4,
+        "retainedOriginals": 6,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "batch restore",
+        "filesScanned": 18,
+        "managedMedia": 4,
+        "revisionObjects": 4,
+        "retainedOriginals": 9,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "host recovery with the site stopped",
+        "filesScanned": 23,
+        "managedMedia": 9,
+        "revisionObjects": 9,
+        "retainedOriginals": 18,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "before deleting",
+        "filesScanned": 25,
+        "managedMedia": 11,
+        "revisionObjects": 11,
+        "retainedOriginals": 22,
+        "leftoversOfDeletedMedia": 0,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      },
+      {
+        "after": "delete, then reconciliation with the site stopped",
+        "filesScanned": 22,
+        "managedMedia": 9,
+        "revisionObjects": 10,
+        "retainedOriginals": 22,
+        "leftoversOfDeletedMedia": 1,
+        "pendingCleanups": 0,
+        "cleanupWaitMs": 0
+      }
+    ]
+  },
+  "runtime": {
+    "runner": "systemd transient service under its own system user, one process per site",
+    "caps": {
+      "memoryMax": "3221225472",
+      "swapMax": "0",
+      "cpuMax": "200000 100000"
+    },
+    "properties": [
+      "MemoryMax=3G",
+      "MemorySwapMax=0",
+      "CPUQuota=200%",
+      "OOMPolicy=continue",
+      "NoNewPrivileges=yes",
+      "ProtectSystem=strict",
+      "ProtectHome=yes",
+      "PrivateTmp=yes",
+      "PrivateDevices=yes",
+      "ProtectKernelTunables=yes",
+      "ProtectKernelModules=yes",
+      "ProtectKernelLogs=yes",
+      "ProtectControlGroups=yes",
+      "ProtectClock=yes",
+      "ProtectHostname=yes",
+      "ProtectProc=invisible",
+      "RestrictSUIDSGID=yes",
+      "RestrictRealtime=yes",
+      "RestrictNamespaces=yes",
+      "LockPersonality=yes",
+      "SystemCallArchitectures=native",
+      "CapabilityBoundingSet=",
+      "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+      "IPAddressDeny=any",
+      "IPAddressAllow=localhost",
+      "UMask=0077",
+      "ReadWritePaths=<data directory>",
+      "TimeoutStopSec=30"
+    ],
+    "units": [
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 257363968
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 723791872
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 153444352
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 115642368
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 179556352
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 144957440
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 113455104
+      },
+      {
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "peakBytes": 206331904
+      }
+    ]
+  },
+  "host": {
+    "emdashCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+    "emdashTree": "90f5be2d7b18659a7a79998f69d694600cbe20e5",
+    "patches": [
+      "0001-media-revisions-private-originals.patch",
+      "0002-bounded-output-validation.patch",
+      "0003-staged-replacement-receipts.patch",
+      "0004-fenced-writers-and-readers.patch",
+      "0005-interrupted-operation-reconciliation.patch",
+      "0006-byte-exact-restore.patch",
+      "0007-native-safe-media-access.patch",
+      "0008-read-retained-original.patch",
+      "0009-decoder-process-cleanup.patch",
+      "0010-public-active-revision.patch"
+    ]
+  },
+  "plugin": {
+    "version": "0.1.0",
+    "upgradeVersion": "0.1.1-qualification"
+  },
+  "site": {
+    "adapter": "@astrojs/node standalone",
+    "database": "SQLite (node:sqlite)",
+    "storage": "local",
+    "binding": "127.0.0.1",
+    "dependencies": {
+      "@astrojs/node": "11.1.5",
+      "@astrojs/react": "6.0.5",
+      "astro": "7.3.2",
+      "emdash": "local tarball",
+      "image-optimizer": "local tarball",
+      "react": "19.2.4",
+      "react-dom": "19.2.4",
+      "sharp": "0.35.4"
+    }
+  },
+  "delivery": {
+    "events": [
+      {
+        "event": "apply",
+        "direct": {
+          "staleResponses": 0,
+          "msToFresh": 4.2,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "f50750ce2792794bd6f13391e1a6e441bb73041d9339c7fd76a0ae0725ab00ea"
+        },
+        "transformed": {
+          "staleResponses": 0,
+          "msToFresh": 13.8,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "fa40f799cd49078da97271317ba7ecd8fd9c21561010810057801b6d743c0680"
+        }
+      },
+      {
+        "event": "restore",
+        "direct": {
+          "staleResponses": 0,
+          "msToFresh": 7.4,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "7351b74b46af4654fa545f2299a08b1c71802e40dc961d4363d1a661e1d4e9f0"
+        },
+        "transformed": {
+          "staleResponses": 0,
+          "msToFresh": 24.7,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "3f544b73849f89332a688bd993ac6af4f5a4cacc38b03c3d07b1854808058211"
+        }
+      },
+      {
+        "event": "re-optimize",
+        "direct": {
+          "staleResponses": 0,
+          "msToFresh": 2.7,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "6fa0e49084bf1a9ee7a5ed16ad1edd339acafb10cb2b175417959e8316d51692"
+        },
+        "transformed": {
+          "staleResponses": 0,
+          "msToFresh": 23.6,
+          "cacheControl": "public, max-age=0, must-revalidate",
+          "etag": null,
+          "sha256": "8962696dcc964ca5efb1be45655877c302c22ea54c7d5e1241b310fa4dff992f"
+        }
+      }
+    ],
+    "direct": {
+      "maxStaleResponses": 0,
+      "maxMsToFresh": 7.4,
+      "cacheControl": [
+        "public, max-age=0, must-revalidate"
+      ]
+    },
+    "transformed": {
+      "maxStaleResponses": 0,
+      "maxMsToFresh": 24.7,
+      "cacheControl": [
+        "public, max-age=0, must-revalidate"
+      ]
+    }
+  },
+  "checks": [
+    {
+      "name": "site packages built",
+      "emdashCommit": "913cb1bb9b7f08c3ff0d258b4420e53835b6a58e",
+      "emdashTree": "90f5be2d7b18659a7a79998f69d694600cbe20e5",
+      "patches": [
+        "0001-media-revisions-private-originals.patch",
+        "0002-bounded-output-validation.patch",
+        "0003-staged-replacement-receipts.patch",
+        "0004-fenced-writers-and-readers.patch",
+        "0005-interrupted-operation-reconciliation.patch",
+        "0006-byte-exact-restore.patch",
+        "0007-native-safe-media-access.patch",
+        "0008-read-retained-original.patch",
+        "0009-decoder-process-cleanup.patch",
+        "0010-public-active-revision.patch"
+      ],
+      "pluginVersion": "0.1.0"
+    },
+    {
+      "name": "sharp loads where the site runs",
+      "sharp": "0.35.4",
+      "libvips": "8.18.6",
+      "glibc": "2.41"
+    },
+    {
+      "name": "fixtures uploaded",
+      "count": 11,
+      "bytes": [
+        1562683,
+        1598965,
+        1597390,
+        1548878,
+        1595354,
+        1597778,
+        1544311,
+        1588770,
+        1590191,
+        1582187,
+        1585234
+      ]
+    },
+    {
+      "name": "public storage before any change: the host records cleanups, every upload at its key",
+      "after": "upload",
+      "filesScanned": 11,
+      "managedMedia": 0,
+      "revisionObjects": 0,
+      "retainedOriginals": 0,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0
+    },
+    {
+      "name": "the unit runs the site under its caps",
+      "properties": [
+        "MemoryMax=3G",
+        "MemorySwapMax=0",
+        "CPUQuota=200%",
+        "OOMPolicy=continue",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "ProtectKernelTunables=yes",
+        "ProtectKernelModules=yes",
+        "ProtectKernelLogs=yes",
+        "ProtectControlGroups=yes",
+        "ProtectClock=yes",
+        "ProtectHostname=yes",
+        "ProtectProc=invisible",
+        "RestrictSUIDSGID=yes",
+        "RestrictRealtime=yes",
+        "RestrictNamespaces=yes",
+        "LockPersonality=yes",
+        "SystemCallArchitectures=native",
+        "CapabilityBoundingSet=",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        "IPAddressDeny=any",
+        "IPAddressAllow=localhost",
+        "UMask=0077",
+        "ReadWritePaths=<data directory>",
+        "TimeoutStopSec=30"
+      ],
+      "memoryMax": "3221225472",
+      "swapMax": "0",
+      "cpuMax": "200000 100000",
+      "serverInUnitCgroup": true,
+      "serverRunsAsSiteUser": true
+    },
+    {
+      "name": "site data belongs to the site user alone",
+      "entries": 20,
+      "files": 15,
+      "privateFiles": 0,
+      "modes": {
+        "data": "700",
+        "database": "600",
+        "private": "700",
+        "uploads": "700",
+        "staging": "700"
+      },
+      "otherUser": "nobody",
+      "otherUserAttempts": 8,
+      "otherUserOutcomes": [
+        "EACCES"
+      ]
+    },
+    {
+      "name": "a second process for the site is not started",
+      "runnerRefusal": "<unit> is already running; a site has exactly one process, so no second one is started",
+      "systemdRefusal": "Failed to start transient service unit: Unit <unit>.service was already loaded or has a fragment file.",
+      "serverProcesses": 1
+    },
+    {
+      "name": "an empty qualified list stays read-only",
+      "reportedProfile": {
+        "runtime": "node",
+        "database": "sqlite",
+        "storage": "local",
+        "locks": "in-process"
+      },
+      "applyOutcome": "unavailable",
+      "bulkStart": "UNAVAILABLE"
+    },
+    {
+      "name": "the shipped default list allows the reported profile",
+      "reportedProfile": {
+        "runtime": "node",
+        "database": "sqlite",
+        "storage": "local",
+        "locks": "in-process"
+      },
+      "qualifiedProfilesOption": "not set"
+    },
+    {
+      "name": "measured scan",
+      "totals": {
+        "scanned": 11,
+        "flagged": 11,
+        "ok": 0,
+        "skipped": {
+          "not-an-image": 0,
+          "unsupported-format": 0,
+          "missing-size": 0,
+          "missing-dimensions": 0,
+          "invalid-metadata": 0
+        },
+        "estimatedSavingsBytes": 0,
+        "unestimated": 0,
+        "measured": 11,
+        "measuredSavingsBytes": 16116853,
+        "failed": 0
+      },
+      "measuredFlagged": 11
+    },
+    {
+      "name": "the processor workers run in the unit cgroup",
+      "workersSeen": 11,
+      "processesSeen": 12
+    },
+    {
+      "name": "a measured scan near the processor limits does not run out of memory under the caps",
+      "images": [
+        {
+          "name": "near-limit-24mp.jpg",
+          "megapixels": 23.9,
+          "bytes": 10954695,
+          "status": "flagged",
+          "basis": "measured",
+          "reason": null
+        },
+        {
+          "name": "near-limit-12mp.webp",
+          "megapixels": 12,
+          "bytes": 5843724,
+          "status": "flagged",
+          "basis": "measured",
+          "reason": null
+        },
+        {
+          "name": "near-limit-12mp-lossless.webp",
+          "megapixels": 12,
+          "bytes": 15523772,
+          "status": "ok",
+          "basis": "measured",
+          "reason": null
+        }
+      ],
+      "sampleBesideScan": {
+        "status": 200,
+        "refusedAsBusy": true
+      },
+      "workersSeen": 15,
+      "processesSeen": 16,
+      "memoryMax": "3221225472",
+      "memoryPeakBytes": 723791872,
+      "memoryEvents": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      }
+    },
+    {
+      "name": "sample changes nothing",
+      "mediaId": "01M41XB2RV2XCM8XTN8G7TBVCR"
+    },
+    {
+      "name": "public storage in line after the first apply",
+      "after": "first apply",
+      "filesScanned": 15,
+      "managedMedia": 1,
+      "revisionObjects": 1,
+      "retainedOriginals": 1,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "stableKeyHoldsCandidate": true,
+      "originalCopiesInUploads": 0
+    },
+    {
+      "name": "apply serves the new bytes at the same URL",
+      "mediaId": "01M41XB2RV2XCM8XTN8G7TBVCR",
+      "url": "/_emdash/api/media/file/01M41XB2KZKTTEV5T7DMCP7X7H.jpg",
+      "originalSha256": "7351b74b46af4654fa545f2299a08b1c71802e40dc961d4363d1a661e1d4e9f0",
+      "servedSha256": "f50750ce2792794bd6f13391e1a6e441bb73041d9339c7fd76a0ae0725ab00ea",
+      "inputBytes": 1562683,
+      "outputBytes": 116705,
+      "fromRevision": "01M41XDGR0Z19HY9NSB4XXE1WY",
+      "toRevision": "01M41XDGZK9NEDD78M95K0NRXK",
+      "editorialKept": [
+        "id",
+        "storage_key",
+        "alt",
+        "caption",
+        "focal_x",
+        "focal_y",
+        "width",
+        "height",
+        "filename"
+      ]
+    },
+    {
+      "name": "retained originals belong to the site user alone",
+      "entries": 27,
+      "files": 20,
+      "privateFiles": 1,
+      "modes": {
+        "data": "700",
+        "database": "600",
+        "private": "700",
+        "uploads": "700",
+        "staging": "700"
+      },
+      "otherUser": "nobody",
+      "otherUserAttempts": 9,
+      "otherUserOutcomes": [
+        "EACCES"
+      ]
+    },
+    {
+      "name": "original not publicly reachable",
+      "privateStoreHoldsOriginal": true,
+      "originalCopiesInUploads": 0,
+      "probes": [
+        {
+          "path": "/_emdash/api/media/file/<original key>",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/media-originals%2F7351b74b46af4654fa545f2299a08b1c71802e40dc961d4363d1a661e1d4e9f0",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/..%2Fprivate%2Fmedia-originals%2F7351b74b46af4654fa545f2299a08b1c71802e40dc961d4363d1a661e1d4e9f0",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/../private/<original key>",
+          "status": 401
+        },
+        {
+          "path": "/_emdash/api/media/file/01M41XB2KZKTTEV5T7DMCP7X7H.jpg",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/file/01M41XB2KZKTTEV5T7DMCP7X7H.jpg?rev=01M41XDGR0Z19HY9NSB4XXE1WY",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/file/01M41XB2KZKTTEV5T7DMCP7X7H.jpg?revision=01M41XDGR0Z19HY9NSB4XXE1WY",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/<media>",
+          "status": 401
+        },
+        {
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-originals%2F7351b74b46af4654fa545f2299a08b1c71802e40dc961d4363d1a661e1d4e9f0&w=320&f=png",
+          "status": 404
+        },
+        {
+          "path": "/_emdash/api/media/file/01M41XB2KZKTTEV5T7DMCP7X7H.jpg",
+          "status": 200
+        },
+        {
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2F01M41XB2KZKTTEV5T7DMCP7X7H.jpg&w=320&f=png",
+          "status": 200
+        },
+        {
+          "path": "/_emdash/api/media/file/media-revisions/f50750ce2792794bd6f13391e1a6e441bb73041d9339c7fd76a0ae0725ab00ea.jpg",
+          "status": 404
+        },
+        {
+          "path": "/_image?href=%2F_emdash%2Fapi%2Fmedia%2Ffile%2Fmedia-revisions%2Ff50750ce2792794bd6f13391e1a6e441bb73041d9339c7fd76a0ae0725ab00ea.jpg&w=320&f=png",
+          "status": 404
+        }
+      ],
+      "staticPathProbes": {
+        "paths": 2,
+        "privateCopies": 1,
+        "requests": 58,
+        "statuses": {
+          "404": 58
+        },
+        "servedOriginal": 0
+      }
+    },
+    {
+      "name": "restore is byte-exact",
+      "mediaId": "01M41XB2RV2XCM8XTN8G7TBVCR",
+      "servedSha256": "7351b74b46af4654fa545f2299a08b1c71802e40dc961d4363d1a661e1d4e9f0",
+      "revision": "01M41XDHBQ6T1AMGDQVTZRFVBT",
+      "restoredFrom": "the private store: no public copy of the original existed"
+    },
+    {
+      "name": "public storage in line after restore",
+      "after": "restore",
+      "filesScanned": 15,
+      "managedMedia": 1,
+      "revisionObjects": 1,
+      "retainedOriginals": 2,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0
+    },
+    {
+      "name": "preset change re-optimizes from the original",
+      "mediaId": "01M41XB2RV2XCM8XTN8G7TBVCR",
+      "preset": "high-fidelity",
+      "inputBytes": 1562683,
+      "outputBytes": 513178,
+      "fencedOn": "01M41XDHPJAP9AV23BY9NJWJ1K",
+      "newRevision": "01M41XDJ9EJ7MF38HRKKG6G1KD",
+      "hostOperationsSince": [
+        "replace"
+      ],
+      "originalReadFrom": "the private store: no public copy of the original existed"
+    },
+    {
+      "name": "public storage in line after re-optimization",
+      "after": "re-optimize",
+      "filesScanned": 15,
+      "managedMedia": 1,
+      "revisionObjects": 1,
+      "retainedOriginals": 2,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0
+    },
+    {
+      "name": "bulk apply",
+      "runId": "2026-10-03T22:16:10.500Z-22e28e0a",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 3,
+        "restored": 0,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      },
+      "grossReductionBytes": 4400864
+    },
+    {
+      "name": "public storage in line after bulk apply",
+      "after": "bulk apply",
+      "filesScanned": 18,
+      "managedMedia": 4,
+      "revisionObjects": 4,
+      "retainedOriginals": 6,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0
+    },
+    {
+      "name": "batch restore is byte-exact",
+      "runId": "2026-10-03T22:17:05.759Z-c3502897",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 0,
+        "restored": 3,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "public storage in line after batch restore",
+      "after": "batch restore",
+      "filesScanned": 18,
+      "managedMedia": 4,
+      "revisionObjects": 4,
+      "retainedOriginals": 9,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0
+    },
+    {
+      "name": "unauthorized and CSRF-invalid requests are refused and change nothing",
+      "requests": 48,
+      "matrix": [
+        {
+          "call": "sample",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "sample",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "sample",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "sample",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "sample",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "sample",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "apply",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "apply",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "apply",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "apply",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "apply",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "apply",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "restore",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "restore",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "restore",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "restore",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "restore",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "restore",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start apply",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-start restore",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-retry",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "bulk-reconcile",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        },
+        {
+          "call": "scan-start",
+          "caller": "no session",
+          "status": 401,
+          "code": "UNAUTHORIZED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "editor without plugins:manage",
+          "status": 403,
+          "code": "FORBIDDEN"
+        },
+        {
+          "call": "scan-start",
+          "caller": "admin session without X-EmDash-Request",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "admin session, cross-origin, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "admin session, cross-origin with forged forwarded headers, no header",
+          "status": 403,
+          "code": "CSRF_REJECTED"
+        },
+        {
+          "call": "scan-start",
+          "caller": "invalid bearer token",
+          "status": 401,
+          "code": "INVALID_TOKEN"
+        }
+      ]
+    },
+    {
+      "name": "upgrade keeps data and a paused run stays paused",
+      "from": "0.1.0",
+      "to": "0.1.1-qualification",
+      "pluginRows": [
+        {
+          "collection": "items",
+          "count": 6
+        },
+        {
+          "collection": "results",
+          "count": 14
+        },
+        {
+          "collection": "runs",
+          "count": 3
+        }
+      ],
+      "results": 14,
+      "runId": "2026-10-03T22:18:05.507Z-62233cd8",
+      "itemsWhilePaused": [
+        "queued",
+        "queued",
+        "queued"
+      ]
+    },
+    {
+      "name": "the paused run resumes after the upgrade",
+      "runId": "2026-10-03T22:18:05.507Z-62233cd8",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 3,
+        "restored": 0,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "disable stops work and images keep serving",
+      "pluginRouteWhileDisabled": 404,
+      "cron": [
+        {
+          "task_name": "bulk-step",
+          "enabled": 0
+        }
+      ]
+    },
+    {
+      "name": "re-enable continues the run",
+      "runId": "2026-10-03T22:20:02.489Z-55a57664",
+      "counts": {
+        "queued": 0,
+        "processing": 0,
+        "ready_to_commit": 0,
+        "committing": 0,
+        "retry_wait": 0,
+        "optimized": 0,
+        "restored": 3,
+        "skipped": 0,
+        "conflict": 0,
+        "failed": 0
+      }
+    },
+    {
+      "name": "sandboxed edition stays read-only",
+      "applyRoute": 404,
+      "bulkStartRoute": 404
+    },
+    {
+      "name": "public storage in line after host recovery, and reconciliation owes nothing",
+      "after": "host recovery with the site stopped",
+      "filesScanned": 23,
+      "managedMedia": 9,
+      "revisionObjects": 9,
+      "retainedOriginals": 18,
+      "leftoversOfDeletedMedia": 0,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0,
+      "reconciliation": {
+        "runs": 1,
+        "pendingPublicCleanups": 0,
+        "mirroredStableKeys": 0,
+        "removedSupersededObjects": 0,
+        "removedCandidateObjects": 0,
+        "interruptedOperations": 0
+      }
+    },
+    {
+      "name": "rollback: unregistered plugin, images serve, host recovery restores byte-exact",
+      "mediaId": "01M41XB3YCH6DGS53293XS04P0",
+      "optimizedSha256": "5fe9aa7bf894961848d4707a72f038c08d5854e9459028b7235a0d4398110def",
+      "restoredSha256": "f91f77e45fd15d14488ac63894bbe011603813f36e4548fcc1320f8ec683dbd5",
+      "recoveryListed": 1,
+      "recoveryResult": true
+    },
+    {
+      "name": "reinstall keeps data continuity",
+      "pluginRows": [
+        {
+          "collection": "items",
+          "count": 12
+        },
+        {
+          "collection": "results",
+          "count": 14
+        },
+        {
+          "collection": "runs",
+          "count": 4
+        }
+      ],
+      "restoreAfterHostRecovery": "nothing-to-restore",
+      "laterRestore": "restored"
+    },
+    {
+      "name": "deleting optimized images leaves no original in public storage",
+      "deleted": 2,
+      "stableKeysRemoved": 2,
+      "problemsBeforeReconciliation": 2,
+      "reconciliation": {
+        "runs": 2,
+        "pendingPublicCleanups": 0,
+        "mirroredStableKeys": 0,
+        "removedSupersededObjects": 1,
+        "removedCandidateObjects": 0,
+        "interruptedOperations": 0
+      },
+      "after": "delete, then reconciliation with the site stopped",
+      "filesScanned": 22,
+      "managedMedia": 9,
+      "revisionObjects": 10,
+      "retainedOriginals": 22,
+      "leftoversOfDeletedMedia": 1,
+      "pendingCleanups": 0,
+      "cleanupWaitMs": 0
+    },
+    {
+      "name": "public storage stayed in line through the run",
+      "checks": 10,
+      "maxFilesScanned": 25,
+      "maxCleanupWaitMs": 0,
+      "cleanupBoundMs": 5000,
+      "staticMountRequests": null
+    },
+    {
+      "name": "site data still belongs to the site user alone at the end",
+      "entries": 56,
+      "files": 49,
+      "privateFiles": 22,
+      "modes": {
+        "data": "700",
+        "database": "600",
+        "private": "700",
+        "uploads": "700",
+        "staging": "700"
+      },
+      "otherUser": "nobody",
+      "otherUserAttempts": 11,
+      "otherUserOutcomes": [
+        "EACCES"
+      ]
+    },
+    {
+      "name": "no unit of the run reached its memory limit",
+      "unitsStarted": 8,
+      "maxPeakBytes": 723791872,
+      "oomKills": 0
+    }
+  ],
+  "durationSeconds": 549
+}

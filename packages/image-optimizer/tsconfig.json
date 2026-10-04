@@ -7,9 +7,10 @@
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": []
   },
-  "include": ["src/**/*", "tests/**/*", "vitest.config.ts", "vitest.host-rejection.config.ts", "vitest.plugin.ts"]
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts", "vitest.host-rejection.config.ts", "vitest.plugin.ts", "vite.native.config.ts"]
 }
