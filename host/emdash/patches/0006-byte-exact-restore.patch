@@ -1,0 +1,1157 @@
+diff --git a/packages/core/package.json b/packages/core/package.json
+index ce6e60ddeee0524b0678f20299c33d6c317d1df5..5089843da4e21d7abcc90a4ac21d656ca28256ed 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -150,6 +150,10 @@
+       "types": "./dist/media/index.d.mts",
+       "default": "./dist/media/index.mjs"
+     },
++    "./media/safe-recovery": {
++      "types": "./dist/media/safe/recovery.d.mts",
++      "default": "./dist/media/safe/recovery.mjs"
++    },
+     "./internal/media/local-runtime": {
+       "types": "./dist/media/local-runtime.d.mts",
+       "default": "./dist/media/local-runtime.mjs"
+diff --git a/packages/core/src/database/repositories/media-operations.ts b/packages/core/src/database/repositories/media-operations.ts
+index 72ee15bc0df4194750e4e7a06b60cd5bdfe3ed5d..105beeb71ef16e2e7d9ea5400cf36003a6330acf 100644
+--- a/packages/core/src/database/repositories/media-operations.ts
++++ b/packages/core/src/database/repositories/media-operations.ts
+@@ -414,6 +414,22 @@ export class MediaOperationsRepository {
+ 			.execute();
+ 	}
+ 
++	/**
++	 * Published operations of a media item that retained an original, newest first.
++	 * These are the originals that may be restored onto that item.
++	 */
++	async listRetainingOperations(mediaId: string): Promise<MediaOperation[]> {
++		return this.db
++			.selectFrom("_emdash_media_operations")
++			.selectAll()
++			.where("media_id", "=", mediaId)
++			.where("state", "=", "published")
++			.where("original_sha256", "is not", null)
++			.orderBy("completed_at", "desc")
++			.orderBy("operation_id", "desc")
++			.execute();
++	}
++
+ 	/** Whether an open operation will write or publish a candidate with this digest. */
+ 	async hasOpenOperationForCandidate(candidateSha256: string): Promise<boolean> {
+ 		const row = await this.db
+diff --git a/packages/core/src/media/safe/recovery.ts b/packages/core/src/media/safe/recovery.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a7ac45d4fac7188ce8ebff643414418420ec0ec
+--- /dev/null
++++ b/packages/core/src/media/safe/recovery.ts
+@@ -0,0 +1,153 @@
++/**
++ * Recovery of safe media without the site runtime.
++ *
++ * Opens the site's SQLite database and storage directories directly, so a
++ * retained original can be listed and restored, and interrupted operations
++ * reconciled, with no plugin installed and without starting the site. It uses
++ * the same replacement service, journal and fence as the running site.
++ *
++ * Node, SQLite and local storage only. The service's locks cover this process
++ * alone, so reconcile from here only while the site is stopped; a restore is
++ * fenced by the database and is safe while the site runs.
++ */
++
++import { existsSync } from "node:fs";
++import { join, resolve } from "node:path";
++
++import { Kysely, SqliteDialect, sql } from "kysely";
++import { ulid } from "ulidx";
++
++import type { Database } from "../../database/types.js";
++import { openNodeSqliteDatabase } from "../../db/node-sqlite-compat.js";
++import { LocalStorage } from "../../storage/local.js";
++import { ImageDecodeError } from "./decoder.js";
++import { createLocalPrivateStorage } from "./private-local.js";
++import { createPrivateOriginalStore } from "./private-originals.js";
++import type { ReconcileOptions, ReconciliationReport } from "./reconciliation.js";
++import type { ReplaceResult, RestorableOriginal } from "./replacement-service.js";
++import { createMediaReplacementService } from "./replacement-service.js";
++import { createOutputValidator } from "./validate-output.js";
++
++export interface OpenSafeMediaRecoveryOptions {
++	/** The site's SQLite database file. It must exist and have migration 092 applied. */
++	databasePath: string;
++	/** The directory of the local media storage (`local({ directory })`). */
++	uploadsDirectory: string;
++	/** `safeMedia.privateDirectory`. */
++	privateDirectory: string;
++	/** Directories served publicly that the private directory must stay out of; defaults to `./public`. */
++	publicDirectories?: string[];
++}
++
++export interface RestoreMediaOptions {
++	/** A retained original of this media item; defaults to the one replaced by the active revision. */
++	originalSha256?: string;
++	/** Defaults to the active revision. Pass the revision you inspected to fail on a concurrent change. */
++	expectedRevisionId?: string;
++	/** Repeat an earlier call's ID to get its receipt again; defaults to a new ID. */
++	operationId?: string;
++}
++
++export interface SafeMediaRecovery {
++	listRestorableOriginals(mediaId: string): Promise<RestorableOriginal[]>;
++	/** Restore a retained original's exact bytes onto an existing media item. */
++	restoreMedia(mediaId: string, options?: RestoreMediaOptions): Promise<ReplaceResult>;
++	reconcile(options?: ReconcileOptions): Promise<ReconciliationReport>;
++	close(): Promise<void>;
++}
++
++export class SafeMediaRecoveryError extends Error {
++	constructor(message: string) {
++		super(message);
++		this.name = "SafeMediaRecoveryError";
++	}
++}
++
++export async function openSafeMediaRecovery(
++	options: OpenSafeMediaRecoveryOptions,
++): Promise<SafeMediaRecovery> {
++	const databasePath = resolve(options.databasePath);
++	// Opening a missing file would silently create an empty database.
++	if (!existsSync(databasePath)) throw new SafeMediaRecoveryError(`No database at ${databasePath}`);
++	const db = new Kysely<Database>({
++		dialect: new SqliteDialect({ database: openNodeSqliteDatabase(databasePath) }),
++	});
++	try {
++		const tables = await sql<{
++			name: string;
++		}>`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${"_emdash_media_operations"}`.execute(
++			db,
++		);
++		if (tables.rows.length === 0)
++			throw new SafeMediaRecoveryError("The database has no safe media records (migration 092)");
++		const storage = new LocalStorage({
++			directory: options.uploadsDirectory,
++			baseUrl: "/_emdash/api/media/file",
++		});
++		const originals = createPrivateOriginalStore(
++			createLocalPrivateStorage({
++				directory: options.privateDirectory,
++				publicDirectories: [
++					resolve(options.uploadsDirectory),
++					...(options.publicDirectories ?? [join(process.cwd(), "public")]),
++				],
++			}),
++		);
++		const service = createMediaReplacementService({
++			db,
++			storage,
++			originals,
++			// Recovery never replaces with new bytes, so it needs no decoder.
++			validator: createOutputValidator({
++				decoder: {
++					decode: () =>
++						Promise.reject(new ImageDecodeError("DECODER_UNAVAILABLE", "Recovery does not decode")),
++				},
++			}),
++		});
++		return {
++			listRestorableOriginals: (mediaId) => service.listRestorableOriginals(mediaId),
++			async restoreMedia(mediaId, restoreOptions = {}) {
++				// A repeated operation ID means the request recorded for it, so its receipt comes back.
++				const earlier = restoreOptions.operationId
++					? await db
++							.selectFrom("_emdash_media_operations")
++							.select(["expected_revision_id", "candidate_sha256"])
++							.where("media_id", "=", mediaId)
++							.where("operation_id", "=", restoreOptions.operationId)
++							.where("kind", "=", "restore")
++							.executeTakeFirst()
++					: undefined;
++				const expectedRevisionId =
++					restoreOptions.expectedRevisionId ??
++					earlier?.expected_revision_id ??
++					(
++						await db
++							.selectFrom("media")
++							.select("revision_id")
++							.where("id", "=", mediaId)
++							.executeTakeFirst()
++					)?.revision_id;
++				if (!expectedRevisionId)
++					return {
++						ok: false,
++						code: "CONFLICT",
++						message: "The media item does not exist or has never been replaced.",
++						retryable: false,
++					};
++				return service.restore({
++					mediaId,
++					operationId: restoreOptions.operationId ?? `recovery-${ulid()}`,
++					expectedRevisionId,
++					originalSha256: restoreOptions.originalSha256 ?? earlier?.candidate_sha256,
++					createdBy: "recovery",
++				});
++			},
++			reconcile: (reconcileOptions) => service.reconcile(reconcileOptions),
++			close: () => db.destroy(),
++		};
++	} catch (error) {
++		await db.destroy();
++		throw error;
++	}
++}
+diff --git a/packages/core/src/media/safe/replacement-service.ts b/packages/core/src/media/safe/replacement-service.ts
+index 95842bc183467e9d76c172e0c19e6fbc67129795..0841b62963bb549a545e0e588dbfa7fe6e341634 100644
+--- a/packages/core/src/media/safe/replacement-service.ts
++++ b/packages/core/src/media/safe/replacement-service.ts
+@@ -9,6 +9,10 @@
+  * earlier step is repeatable and invisible: readers resolve the active
+  * revision's complete object and never see a candidate until the commit.
+  *
++ * Restore publishes a retained original through the same journal, fence and
++ * commit point, so it is idempotent, cannot overwrite a newer edit and cannot
++ * recreate deleted media. The bytes it replaces are retained in turn.
++ *
+  * Operations are idempotent per media item and operation ID. A repeated
+  * identical request returns the stored outcome (or resumes an interrupted
+  * one); the same ID with different input is refused.
+@@ -24,6 +28,7 @@ import { ulid } from "ulidx";
+ 
+ import type {
+ 	MediaOperation,
++	MediaOperationKind,
+ 	MediaRevision,
+ 	ReplacementGeometry,
+ } from "../../database/repositories/media-operations.js";
+@@ -35,16 +40,19 @@ import type { Database } from "../../database/types.js";
+ import type { Storage } from "../../storage/types.js";
+ import { computeContentHash } from "../../utils/hash.js";
+ import type { SafeImageFormat } from "./decode-limits.js";
++import { FORMAT_MIME, SAFE_IMAGE_FORMATS } from "./decode-limits.js";
+ import { sha256Hex } from "./digest.js";
+ import { errorText } from "./error-text.js";
+ import { createKeyedLock } from "./keyed-lock.js";
++import { isSha256Hex } from "./original-keys.js";
+ import type { PrivateOriginalStore } from "./private-originals.js";
+ import { PrivateOriginalError } from "./private-originals.js";
+ import type { ReconcileOptions, ReconciliationReport } from "./reconciliation.js";
+ import { DEFAULT_RECONCILE_GRACE_MS, reconciledOutcome, sweepOrphans } from "./reconciliation.js";
+ import { revisionObjectKey } from "./revision-keys.js";
++import { readHeaderDimensions, sniffFormat } from "./sniff.js";
+ import type { OutputRejectionCode } from "./validate-output.js";
+-import { createOutputValidator } from "./validate-output.js";
++import { createOutputValidator, formatOfMime } from "./validate-output.js";
+ 
+ export type ReplacementStep =
+ 	| "intent-recorded"
+@@ -64,7 +72,9 @@ export type ReplacementRejectionCode =
+ 	| "SOURCE_CHANGED"
+ 	| "BACKUP_FAILED"
+ 	| "TRANSACTIONS_UNSUPPORTED"
+-	| "INTERRUPTED";
++	| "INTERRUPTED"
++	| "NO_ORIGINAL"
++	| "ORIGINAL_UNAVAILABLE";
+ 
+ export interface ReplaceRequest {
+ 	mediaId: string;
+@@ -79,10 +89,39 @@ export interface ReplaceRequest {
+ 	createdBy?: string;
+ }
+ 
++export interface RestoreRequest {
++	mediaId: string;
++	operationId: string;
++	/** The revision the caller read; the host restores only if it is still active. */
++	expectedRevisionId: string;
++	/**
++	 * SHA-256 of the retained original to restore; it must have been retained by an
++	 * operation on this media item. Defaults to the original kept by the operation
++	 * that published `expectedRevisionId`, which undoes that change.
++	 */
++	originalSha256?: string;
++	createdBy?: string;
++}
++
++/** A retained original that may be restored onto a media item. */
++export interface RestorableOriginal {
++	sha256: string;
++	size: number;
++	mimeType: string;
++	/** The revision whose exact bytes these are. */
++	sourceRevisionId: string;
++	/** The operation that retained them, and the revision it published in their place. */
++	retainedByOperationId: string;
++	retainedByKind: string;
++	replacedByRevisionId: string | null;
++	retainedAt: string | null;
++}
++
+ export interface PublishedReceipt {
+ 	status: "published";
+ 	operationId: string;
+-	kind: "replace";
++	/** For a restore, `candidateSha256` is the restored original and `originalSha256` the bytes it replaced. */
++	kind: MediaOperationKind;
+ 	mediaId: string;
+ 	expectedRevisionId: string;
+ 	newRevisionId: string;
+@@ -149,6 +188,8 @@ const MESSAGES: Readonly<Record<string, string>> = {
+ 	SOURCE_CHANGED: "The source image no longer matches its recorded revision.",
+ 	BACKUP_FAILED: "The original could not be retained, so nothing was published.",
+ 	TRANSACTIONS_UNSUPPORTED: "This database cannot publish atomically; replacement is unavailable.",
++	NO_ORIGINAL: "No retained original of this media item matches the request.",
++	ORIGINAL_UNAVAILABLE: "The retained original is missing or no longer matches its digest.",
+ 	INTERRUPTED:
+ 		"The operation was interrupted and ended by reconciliation without publishing; use a new operation ID.",
+ };
+@@ -217,6 +258,8 @@ const REJECTION_CODES: readonly ReplacementRejectionCode[] = [
+ 	"BACKUP_FAILED",
+ 	"TRANSACTIONS_UNSUPPORTED",
+ 	"INTERRUPTED",
++	"NO_ORIGINAL",
++	"ORIGINAL_UNAVAILABLE",
+ ];
+ 
+ function isRejectionCode(value: string | null): value is ReplacementRejectionCode {
+@@ -474,6 +517,160 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 		return proceed(operation, candidate, request.bytes);
+ 	}
+ 
++	/**
++	 * The original a restore publishes: one retained by a published operation on
++	 * this media item, so a caller can never publish another item's bytes here.
++	 */
++	async function chooseOriginal(
++		mediaId: string,
++		expectedRevisionId: string,
++		originalSha256: string | undefined,
++	): Promise<{ sha256: string; sourceRevisionId: string } | null> {
++		const retaining = await repo.listRetainingOperations(mediaId);
++		const chosen =
++			originalSha256 === undefined
++				? retaining.find((operation) => operation.candidate_revision_id === expectedRevisionId)
++				: retaining.find((operation) => operation.original_sha256 === originalSha256);
++		if (!chosen?.original_sha256) return null;
++		if (!(await repo.getOriginal(chosen.original_sha256))) return null;
++		return { sha256: chosen.original_sha256, sourceRevisionId: chosen.expected_revision_id };
++	}
++
++	async function listRestorableOriginals(mediaId: string): Promise<RestorableOriginal[]> {
++		const seen = new Set<string>();
++		const result: RestorableOriginal[] = [];
++		for (const operation of await repo.listRetainingOperations(mediaId)) {
++			const sha256 = operation.original_sha256;
++			if (!sha256 || seen.has(sha256)) continue;
++			seen.add(sha256);
++			const original = await repo.getOriginal(sha256);
++			if (!original) continue;
++			result.push({
++				sha256,
++				size: original.size,
++				mimeType: original.mime_type,
++				sourceRevisionId: operation.expected_revision_id,
++				retainedByOperationId: operation.operation_id,
++				retainedByKind: operation.kind,
++				replacedByRevisionId: operation.candidate_revision_id,
++				retainedAt: operation.completed_at,
++			});
++		}
++		return result;
++	}
++
++	async function restore(request: RestoreRequest): Promise<ReplaceResult> {
++		if (
++			!IDENTIFIER.test(request.operationId) ||
++			!request.mediaId ||
++			request.mediaId.length > 128 ||
++			!request.expectedRevisionId ||
++			(request.originalSha256 !== undefined && !isSha256Hex(request.originalSha256))
++		) {
++			return rejected("INVALID_REQUEST");
++		}
++		const chosen = await chooseOriginal(
++			request.mediaId,
++			request.expectedRevisionId,
++			request.originalSha256,
++		);
++		if (!chosen) return rejected("NO_ORIGINAL");
++		return tracked(request.mediaId, request.operationId, chosen.sha256, () =>
++			refuseNonAtomic(() => runRestore(request, chosen)),
++		);
++	}
++
++	async function runRestore(
++		request: RestoreRequest,
++		chosen: { sha256: string; sourceRevisionId: string },
++	): Promise<ReplaceResult> {
++		const { mediaId, operationId } = request;
++		const begun = await repo.beginOperation({
++			mediaId,
++			operationId,
++			kind: "restore",
++			expectedRevisionId: request.expectedRevisionId,
++			candidateSha256: chosen.sha256,
++			createdBy: request.createdBy,
++		});
++		if (begun.status === "conflict") return rejected("CONFLICTING_OPERATION");
++		const replay = replayOf(begun.operation);
++		if (replay) return replay;
++		let operation = begun.operation;
++		await step("intent-recorded", mediaId, operationId);
++
++		let mediaMimeType = "";
++		if (operation.state === "intent") {
++			const current = await db
++				.selectFrom("media")
++				.select(["revision_id", "status", "mime_type"])
++				.where("id", "=", mediaId)
++				.executeTakeFirst();
++			if (
++				!current ||
++				current.status !== "ready" ||
++				current.revision_id !== operation.expected_revision_id
++			)
++				return reject(operation, "CONFLICT");
++			mediaMimeType = current.mime_type;
++		}
++
++		let candidate: MediaRevision | null = operation.candidate_revision_id
++			? await repo.getRevision(operation.candidate_revision_id)
++			: null;
++		// A staged candidate already holds the verified bytes; otherwise the private copy is
++		// the source, and `read` verifies it against its digest.
++		const staged = candidate ? await readObject(storage, candidate.object_key) : null;
++		let bytes: Uint8Array;
++		if (staged && (await sha256Hex(staged)) === chosen.sha256) bytes = staged;
++		else {
++			try {
++				bytes = await originals.read(chosen.sha256);
++			} catch (error) {
++				if (!(error instanceof PrivateOriginalError)) throw error;
++				if (error.code === "ORIGINAL_STORAGE_ERROR")
++					return {
++						ok: false,
++						code: "ORIGINAL_UNAVAILABLE",
++						message: "The private original storage could not be read; retry later.",
++						retryable: true,
++					};
++				return reject(operation, "ORIGINAL_UNAVAILABLE");
++			}
++		}
++
++		if (operation.state === "intent") {
++			const expected = formatOfMime(mediaMimeType);
++			const sniffed = sniffFormat(bytes);
++			const format = SAFE_IMAGE_FORMATS.find((safe) => safe === sniffed);
++			if (!format || !expected) return reject(operation, "UNSUPPORTED_FORMAT");
++			if (format !== expected) return reject(operation, "WRONG_FORMAT");
++			// The byte-derived metadata the site recorded for exactly these bytes, else the header's.
++			const source = await repo.getRevision(chosen.sourceRevisionId);
++			const recorded =
++				source?.sha256 === chosen.sha256 && source.width && source.height
++					? { width: source.width, height: source.height }
++					: null;
++			const geometry = recorded ?? readHeaderDimensions(bytes);
++			if (!geometry) return reject(operation, "UNDECODABLE");
++			const result = await stageCandidate(operation, bytes, {
++				kind: "restore",
++				format,
++				mime_type: FORMAT_MIME[format],
++				size: bytes.byteLength,
++				width: geometry.width,
++				height: geometry.height,
++				sha256: chosen.sha256,
++			});
++			operation = result.operation;
++			candidate = result.candidate;
++			if (!result.advanced) return replayOf(operation) ?? rejected("CONFLICT");
++		}
++		await step("candidate-staged", mediaId, operationId);
++		if (!candidate) return reject(operation, "CONFLICT");
++		return proceed(operation, candidate, bytes);
++	}
++
+ 	/**
+ 	 * Retain the exact original and publish, from whichever of those states the
+ 	 * operation is in. `candidateBytes` are the verified bytes of the staged
+@@ -560,7 +757,7 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 				const receipt: PublishedReceipt = {
+ 					status: "published",
+ 					operationId,
+-					kind: "replace",
++					kind: ready.kind === "restore" ? "restore" : "replace",
+ 					mediaId,
+ 					expectedRevisionId: ready.expected_revision_id,
+ 					newRevisionId: candidate.id,
+@@ -681,6 +878,14 @@ export function createMediaReplacementService(options: ReplacementServiceOptions
+ 
+ 	return {
+ 		replace,
++		/**
++		 * Publish a retained original's exact bytes against the expected current
++		 * revision. Editorial metadata is kept (the focal point only while the
++		 * dimensions are unchanged); byte-derived metadata describes the restored bytes.
++		 */
++		restore,
++		/** Originals retained for a media item, newest first, as `restore` accepts them. */
++		listRestorableOriginals,
+ 		/**
+ 		 * Complete or roll back interrupted operations and remove objects no record
+ 		 * references. Safe to run at any time in the writing process; see
+diff --git a/packages/core/src/media/safe/validate-output.ts b/packages/core/src/media/safe/validate-output.ts
+index 7b6dad7b59263a8d799ccb7503538be07d0fd83c..a30166b9129049ff37634d068837f0707ada4152 100644
+--- a/packages/core/src/media/safe/validate-output.ts
++++ b/packages/core/src/media/safe/validate-output.ts
+@@ -75,7 +75,7 @@ function rejection(code: OutputRejectionCode): OutputValidation {
+ 	return { ok: false, code, message: MESSAGES[code], retryable: code === "BUSY" };
+ }
+ 
+-function formatOfMime(mimeType: string): SafeImageFormat | null {
++export function formatOfMime(mimeType: string): SafeImageFormat | null {
+ 	const mime = normalizeMime(mimeType);
+ 	return (
+ 		SAFE_IMAGE_FORMATS.find((format) => FORMAT_MIME[format] === mime) ??
+diff --git a/packages/core/tests/unit/media/safe/restore.test.ts b/packages/core/tests/unit/media/safe/restore.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef1e52bb3ac0a79b794c9ed20def143c9d3cb23e
+--- /dev/null
++++ b/packages/core/tests/unit/media/safe/restore.test.ts
+@@ -0,0 +1,625 @@
++import { createHash } from "node:crypto";
++import { existsSync } from "node:fs";
++import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Kysely, SqliteDialect } from "kysely";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++
++import { GET } from "../../../../src/astro/routes/api/media/file/[...key].js";
++import { runMigrations } from "../../../../src/database/migrations/runner.js";
++import { MediaRepository } from "../../../../src/database/repositories/media.js";
++import type { Database } from "../../../../src/database/types.js";
++import { openNodeSqliteDatabase } from "../../../../src/db/node-sqlite-compat.js";
++import { createLocalPrivateStorage } from "../../../../src/media/safe/private-local.js";
++import { createPrivateOriginalStore } from "../../../../src/media/safe/private-originals.js";
++import {
++	openSafeMediaRecovery,
++	SafeMediaRecoveryError,
++} from "../../../../src/media/safe/recovery.js";
++import type {
++	ReplacementStep,
++	RestoreRequest,
++} from "../../../../src/media/safe/replacement-service.js";
++import { createMediaReplacementService } from "../../../../src/media/safe/replacement-service.js";
++import { createOutputValidator } from "../../../../src/media/safe/validate-output.js";
++import { LocalStorage } from "../../../../src/storage/local.js";
++import { computeContentHash } from "../../../../src/utils/hash.js";
++import { inProcessDecoder, noisy, solid } from "./output-fixtures.js";
++
++const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
++const KEY = "01HZRESTORE.png";
++const STEPS: ReplacementStep[] = [
++	"intent-recorded",
++	"candidate-object-written",
++	"candidate-staged",
++	"original-object-retained",
++	"original-retained",
++	"publish-prepared",
++	"published",
++];
++
++class Died extends Error {}
++
++describe("byte-exact restore", () => {
++	let root: string;
++	let db: Kysely<Database>;
++	let active: LocalStorage;
++	let originalBytes: Uint8Array;
++	let optimized: Uint8Array;
++	let mediaId: string;
++	let baselineId: string;
++	let optimizedRevisionId: string;
++
++	const open = () =>
++		new Kysely<Database>({
++			dialect: new SqliteDialect({ database: openNodeSqliteDatabase(join(root, "site.db")) }),
++		});
++	const originalsStore = () =>
++		createPrivateOriginalStore(
++			createLocalPrivateStorage({
++				directory: join(root, "private"),
++				publicDirectories: [join(root, "uploads")],
++			}),
++		);
++
++	function build(onStep?: (step: ReplacementStep) => Promise<void> | void) {
++		return createMediaReplacementService({
++			db,
++			storage: active,
++			originals: originalsStore(),
++			validator: createOutputValidator({ decoder: inProcessDecoder }),
++			onStep: onStep ? (step) => onStep(step) : undefined,
++		});
++	}
++
++	async function restart(onStep?: Parameters<typeof build>[0]) {
++		await db.destroy();
++		db = open();
++		return build(onStep);
++	}
++
++	const restoreRequest = (extra: Partial<RestoreRequest> = {}): RestoreRequest => ({
++		mediaId,
++		operationId: "restore-1",
++		expectedRevisionId: optimizedRevisionId,
++		...extra,
++	});
++	const served = async () => {
++		const response = await GET({
++			params: { key: KEY },
++			locals: { emdash: { storage: active, db } },
++			request: new Request("https://example.com"),
++		} as never);
++		return response.status === 200 ? new Uint8Array(await response.arrayBuffer()) : null;
++	};
++	const row = () => db.selectFrom("media").selectAll().where("id", "=", mediaId).executeTakeFirst();
++	const count = async (
++		table: "_emdash_media_revisions" | "_emdash_media_originals" | "_emdash_media_operations",
++	) =>
++		Number(
++			(
++				await db
++					.selectFrom(table)
++					.select((eb) => eb.fn.countAll().as("n"))
++					.executeTakeFirstOrThrow()
++			).n,
++		);
++	const files = async (directory: string) =>
++		(await readdir(join(root, directory)).catch((): string[] => [])).toSorted((a, b) =>
++			a.localeCompare(b),
++		);
++
++	/** Served bytes, row and active revision all describe `bytes`. */
++	async function expectServing(bytes: Uint8Array, width = 64, height = 48) {
++		expect(sha((await served())!)).toBe(sha(bytes));
++		const media = (await row())!;
++		expect(media).toMatchObject({
++			size: bytes.byteLength,
++			width,
++			height,
++			content_hash: await computeContentHash(bytes),
++		});
++		const revision = await db
++			.selectFrom("_emdash_media_revisions")
++			.selectAll()
++			.where("id", "=", media.revision_id!)
++			.executeTakeFirstOrThrow();
++		expect(revision).toMatchObject({ sha256: sha(bytes), size: bytes.byteLength, width, height });
++	}
++
++	beforeEach(async () => {
++		root = await mkdtemp(join(tmpdir(), "emdash-restore-"));
++		await mkdir(join(root, "uploads"), { recursive: true });
++		db = open();
++		await runMigrations(db);
++		active = new LocalStorage({ directory: join(root, "uploads"), baseUrl: "/media" });
++		originalBytes = await noisy(64, 48, "png");
++		optimized = await solid(64, 48, "#2060e0").png().toBuffer();
++		await active.upload({ key: KEY, body: originalBytes, contentType: "image/png" });
++		const media = await new MediaRepository(db).create({
++			filename: "photo.png",
++			mimeType: "image/png",
++			size: originalBytes.byteLength,
++			width: 64,
++			height: 48,
++			alt: "Original alt",
++			caption: "Original caption",
++			storageKey: KEY,
++			contentHash: await computeContentHash(originalBytes),
++			status: "ready",
++			authorId: "author-1",
++		});
++		mediaId = media.id;
++		await new MediaRepository(db).update(mediaId, { focalX: 0.25, focalY: 0.75 });
++		const service = build();
++		baselineId = (await service.getSourceRevision(mediaId))!.id;
++		const optimizedResult = await service.replace({
++			mediaId,
++			operationId: "optimize-1",
++			expectedRevisionId: baselineId,
++			bytes: optimized,
++			expectedSha256: sha(optimized),
++		});
++		if (!optimizedResult.ok) throw new Error(JSON.stringify(optimizedResult));
++		optimizedRevisionId = optimizedResult.receipt.newRevisionId;
++	});
++
++	afterEach(async () => {
++		await db.destroy();
++		await rm(root, { recursive: true, force: true });
++	});
++
++	describe("restoring", () => {
++		it("publishes the exact original bytes and keeps identity and current editorial metadata", async () => {
++			await new MediaRepository(db).update(mediaId, {
++				alt: "Edited alt",
++				caption: "Edited caption",
++			});
++			await db
++				.updateTable("media")
++				.set({ blurhash: "stale", dominant_color: "rgb(1,2,3)" })
++				.where("id", "=", mediaId)
++				.execute();
++			const before = (await row())!;
++			const result = await build().restore(restoreRequest());
++			expect(result).toMatchObject({
++				ok: true,
++				replayed: false,
++				receipt: {
++					kind: "restore",
++					mediaId,
++					expectedRevisionId: optimizedRevisionId,
++					candidateSha256: sha(originalBytes),
++					originalSha256: sha(optimized),
++					size: originalBytes.byteLength,
++					width: 64,
++					height: 48,
++				},
++			});
++			const after = (await row())!;
++			for (const column of [
++				"id",
++				"filename",
++				"mime_type",
++				"storage_key",
++				"alt",
++				"caption",
++				"focal_x",
++				"focal_y",
++				"folder_id",
++				"author_id",
++				"created_at",
++				"status",
++			] as const) {
++				expect(after[column], column).toEqual(before[column]);
++			}
++			expect([after.alt, after.caption, after.focal_x, after.focal_y]).toEqual([
++				"Edited alt",
++				"Edited caption",
++				0.25,
++				0.75,
++			]);
++			expect([after.blurhash, after.dominant_color]).toEqual([null, null]);
++			await expectServing(originalBytes);
++			// The published object is byte-identical to the original the site first served.
++			const restored = await db
++				.selectFrom("_emdash_media_revisions")
++				.selectAll()
++				.where("id", "=", after.revision_id!)
++				.executeTakeFirstOrThrow();
++			expect(restored.kind).toBe("restore");
++			expect(sha(await readFile(join(root, "uploads", restored.object_key)))).toBe(
++				sha(originalBytes),
++			);
++			// The bytes it replaced are retained in turn, so the restore can be undone.
++			expect(await files("private/media-originals")).toEqual(
++				[sha(originalBytes), sha(optimized)].toSorted((a, b) => a.localeCompare(b)),
++			);
++			expect(await readFile(join(root, "uploads", KEY))).toEqual(Buffer.from(originalBytes));
++		});
++
++		it("can undo a restore, and lists what may be restored", async () => {
++			const service = build();
++			const first = await service.restore(restoreRequest());
++			if (!first.ok) throw new Error(JSON.stringify(first));
++			expect((await service.listRestorableOriginals(mediaId)).map((each) => each.sha256)).toEqual([
++				sha(optimized),
++				sha(originalBytes),
++			]);
++			const undo = await service.restore(
++				restoreRequest({
++					operationId: "restore-2",
++					expectedRevisionId: first.receipt.newRevisionId,
++				}),
++			);
++			expect(undo).toMatchObject({ ok: true, receipt: { candidateSha256: sha(optimized) } });
++			await expectServing(optimized);
++			expect(await count("_emdash_media_originals")).toBe(2);
++		});
++
++		it("restores an explicitly chosen original of this media item", async () => {
++			const service = build();
++			const second = await solid(64, 48, "#e02060").png().toBuffer();
++			const replaced = await service.replace({
++				mediaId,
++				operationId: "optimize-2",
++				expectedRevisionId: optimizedRevisionId,
++				bytes: second,
++			});
++			if (!replaced.ok) throw new Error(JSON.stringify(replaced));
++			const result = await service.restore(
++				restoreRequest({
++					expectedRevisionId: replaced.receipt.newRevisionId,
++					originalSha256: sha(originalBytes),
++				}),
++			);
++			expect(result.ok).toBe(true);
++			await expectServing(originalBytes);
++		});
++
++		it("restores the original geometry and drops a focal point that described other dimensions", async () => {
++			const service = build();
++			const bigger = await solid(80, 60, "#30a030").png().toBuffer();
++			const edited = await service.replace({
++				mediaId,
++				operationId: "editor",
++				expectedRevisionId: optimizedRevisionId,
++				bytes: bigger,
++				geometry: "any",
++			});
++			if (!edited.ok) throw new Error(JSON.stringify(edited));
++			await new MediaRepository(db).update(mediaId, { focalX: 0.5, focalY: 0.5 });
++			const result = await service.restore(
++				restoreRequest({ expectedRevisionId: edited.receipt.newRevisionId }),
++			);
++			expect(result).toMatchObject({ ok: true, receipt: { candidateSha256: sha(optimized) } });
++			await expectServing(optimized, 64, 48);
++			const after = (await row())!;
++			expect([after.focal_x, after.focal_y, after.alt]).toEqual([null, null, "Original alt"]);
++		});
++
++		it("needs no image decoder", async () => {
++			const service = createMediaReplacementService({
++				db,
++				storage: active,
++				originals: originalsStore(),
++				validator: createOutputValidator({
++					decoder: { decode: () => Promise.reject(new Error("decoder must not run")) },
++				}),
++			});
++			expect((await service.restore(restoreRequest())).ok).toBe(true);
++			await expectServing(originalBytes);
++		});
++	});
++
++	describe("fencing and identity", () => {
++		it("returns the same receipt for a repeated operation ID without another mutation or backup", async () => {
++			const service = build();
++			const first = await service.restore(restoreRequest());
++			const revisions = await count("_emdash_media_revisions");
++			const again = await service.restore(restoreRequest());
++			expect(again).toEqual({ ...first, replayed: true });
++			// Naming the default original explicitly is the same request.
++			expect(await service.restore(restoreRequest({ originalSha256: sha(originalBytes) }))).toEqual(
++				{ ...first, replayed: true },
++			);
++			expect(await count("_emdash_media_revisions")).toBe(revisions);
++			expect(await count("_emdash_media_originals")).toBe(2);
++			expect(await count("_emdash_media_operations")).toBe(2);
++		});
++
++		it("rejects reuse of an operation ID for a different restore", async () => {
++			const service = build();
++			expect((await service.restore(restoreRequest())).ok).toBe(true);
++			const now = (await row())!.revision_id!;
++			expect(await service.restore(restoreRequest({ expectedRevisionId: now }))).toMatchObject({
++				ok: false,
++				code: "CONFLICTING_OPERATION",
++			});
++		});
++
++		it("reports a conflict, durably, when the image was replaced after the caller read it", async () => {
++			const service = build();
++			const editorBytes = await solid(64, 48, "#20e040").png().toBuffer();
++			expect(
++				(
++					await service.replace({
++						mediaId,
++						operationId: "editor",
++						expectedRevisionId: optimizedRevisionId,
++						bytes: editorBytes,
++					})
++				).ok,
++			).toBe(true);
++			const revisions = await count("_emdash_media_revisions");
++			const objects = await files("uploads/media-revisions");
++			const stale = await service.restore(restoreRequest({ originalSha256: sha(originalBytes) }));
++			// Refused before anything is staged.
++			expect(await count("_emdash_media_revisions")).toBe(revisions);
++			expect(await files("uploads/media-revisions")).toEqual(objects);
++			expect(stale).toMatchObject({
++				ok: false,
++				code: "CONFLICT",
++				receipt: { status: "rejected", code: "CONFLICT" },
++			});
++			expect(
++				await service.restore(restoreRequest({ originalSha256: sha(originalBytes) })),
++			).toMatchObject({ code: "CONFLICT" });
++			await expectServing(editorBytes);
++		});
++
++		it("loses a race to an editor between retention and the commit", async () => {
++			const editorBytes = await solid(64, 48, "#20e040").png().toBuffer();
++			const editor = build();
++			const slow = build(async (step) => {
++				if (step === "original-retained")
++					expect(
++						(
++							await editor.replace({
++								mediaId,
++								operationId: "editor",
++								expectedRevisionId: optimizedRevisionId,
++								bytes: editorBytes,
++							})
++						).ok,
++					).toBe(true);
++			});
++			expect(await slow.restore(restoreRequest())).toMatchObject({ ok: false, code: "CONFLICT" });
++			await expectServing(editorBytes);
++		});
++
++		it("fails after deletion and never recreates the media item", async () => {
++			const service = build();
++			await new MediaRepository(db).delete(mediaId);
++			expect(await service.restore(restoreRequest())).toMatchObject({
++				ok: false,
++				code: "CONFLICT",
++				receipt: { code: "CONFLICT" },
++			});
++			expect(await db.selectFrom("media").selectAll().execute()).toEqual([]);
++		});
++
++		it("refuses a deletion that wins the race between retention and the commit", async () => {
++			const racing = build(async (step) => {
++				if (step === "original-retained") await new MediaRepository(db).delete(mediaId);
++			});
++			expect(await racing.restore(restoreRequest())).toMatchObject({ ok: false, code: "CONFLICT" });
++			expect(await row()).toBeUndefined();
++		});
++
++		it("restores only originals retained for this media item", async () => {
++			const service = build();
++			const otherBytes = await noisy(64, 48, "png");
++			const otherOriginal = await solid(64, 48, "#000000").png().toBuffer();
++			await active.upload({ key: "other.png", body: otherOriginal, contentType: "image/png" });
++			const other = await new MediaRepository(db).create({
++				filename: "other.png",
++				mimeType: "image/png",
++				size: otherOriginal.byteLength,
++				width: 64,
++				height: 48,
++				storageKey: "other.png",
++				contentHash: await computeContentHash(otherOriginal),
++				status: "ready",
++			});
++			const otherBaseline = (await service.getSourceRevision(other.id))!;
++			expect(
++				(
++					await service.replace({
++						mediaId: other.id,
++						operationId: "optimize-other",
++						expectedRevisionId: otherBaseline.id,
++						bytes: otherBytes,
++					})
++				).ok,
++			).toBe(true);
++			// The other item's original is retained, but not for this one.
++			expect(
++				await service.restore(restoreRequest({ originalSha256: sha(otherOriginal) })),
++			).toMatchObject({ ok: false, code: "NO_ORIGINAL" });
++			// A baseline was never replaced, so there is nothing to undo.
++			expect(
++				await service.restore(restoreRequest({ expectedRevisionId: baselineId })),
++			).toMatchObject({ ok: false, code: "NO_ORIGINAL" });
++			await expectServing(optimized);
++		});
++
++		it("validates the request", async () => {
++			const service = build();
++			for (const bad of [
++				{ operationId: "has space" },
++				{ mediaId: "" },
++				{ expectedRevisionId: "" },
++				{ originalSha256: "not-a-digest" },
++			]) {
++				expect(await service.restore(restoreRequest(bad))).toMatchObject({
++					code: "INVALID_REQUEST",
++				});
++			}
++			expect(await count("_emdash_media_operations")).toBe(1);
++		});
++	});
++
++	describe("integrity of the retained original", () => {
++		it("publishes nothing when the private original is missing, durably for that operation ID", async () => {
++			await rm(join(root, "private", "media-originals", sha(originalBytes)));
++			const service = build();
++			expect(await service.restore(restoreRequest())).toMatchObject({
++				ok: false,
++				code: "ORIGINAL_UNAVAILABLE",
++				receipt: { code: "ORIGINAL_UNAVAILABLE" },
++			});
++			await expectServing(optimized);
++			expect(await files("uploads/media-revisions")).toEqual([`${sha(optimized)}.png`]);
++		});
++
++		it("publishes nothing when the private original no longer matches its digest", async () => {
++			await writeFile(
++				join(root, "private", "media-originals", sha(originalBytes)),
++				originalBytes.subarray(0, 100),
++			);
++			expect(await build().restore(restoreRequest())).toMatchObject({
++				ok: false,
++				code: "ORIGINAL_UNAVAILABLE",
++			});
++			await expectServing(optimized);
++		});
++	});
++
++	describe("interruption", () => {
++		for (const step of STEPS) {
++			it(`after ${step}: a retry with the same ID publishes exactly once, and reconciliation agrees`, async () => {
++				await expect(
++					build((current) => {
++						if (current === step) throw new Died(step);
++					}).restore(restoreRequest()),
++				).rejects.toThrow(Died);
++				expect(sha((await served())!)).toBe(sha(step === "published" ? originalBytes : optimized));
++
++				const service = await restart();
++				const report = await service.reconcile({ graceMs: 0, now: new Date(Date.now() + 60_000) });
++				const completedByReconciliation = ![
++					"intent-recorded",
++					"candidate-object-written",
++					"published",
++				].includes(step);
++				if (completedByReconciliation)
++					expect(report.operations).toEqual([
++						expect.objectContaining({ kind: "restore", outcome: "published" }),
++					]);
++				const retry = await service.restore(restoreRequest());
++				if (step === "intent-recorded" || step === "candidate-object-written") {
++					// Nothing durable was staged, so reconciliation rolled it back.
++					expect(retry).toMatchObject({ ok: false, code: "INTERRUPTED" });
++					await expectServing(optimized);
++					expect((await service.restore(restoreRequest({ operationId: "restore-2" }))).ok).toBe(
++						true,
++					);
++				} else {
++					expect(retry).toMatchObject({ ok: true, replayed: true });
++				}
++				await expectServing(originalBytes);
++				expect(await files("private/media-originals")).toEqual(
++					[sha(originalBytes), sha(optimized)].toSorted((a, b) => a.localeCompare(b)),
++				);
++				expect(await files("uploads/media-revisions")).toEqual(
++					[`${sha(originalBytes)}.png`, `${sha(optimized)}.png`].toSorted((a, b) =>
++						a.localeCompare(b),
++					),
++				);
++			});
++
++			it(`after ${step}: resuming with the same ID without reconciliation publishes exactly once`, async () => {
++				await expect(
++					build((current) => {
++						if (current === step) throw new Died(step);
++					}).restore(restoreRequest()),
++				).rejects.toThrow(Died);
++				const service = await restart();
++				expect(await service.restore(restoreRequest())).toMatchObject({
++					ok: true,
++					replayed: step === "published",
++				});
++				await expectServing(originalBytes);
++				expect(await count("_emdash_media_operations")).toBe(2);
++				expect(await count("_emdash_media_originals")).toBe(2);
++				expect(await count("_emdash_media_revisions")).toBe(3);
++			});
++		}
++	});
++
++	describe("independent recovery entry point", () => {
++		const paths = () => ({
++			databasePath: join(root, "site.db"),
++			uploadsDirectory: join(root, "uploads"),
++			privateDirectory: join(root, "private"),
++			publicDirectories: [join(root, "public")],
++		});
++
++		it("restores by media ID from the files alone, with no runtime, plugin or decoder", async () => {
++			await new MediaRepository(db).update(mediaId, { alt: "Edited alt" });
++			await db.destroy();
++			const recovery = await openSafeMediaRecovery(paths());
++			try {
++				expect(
++					(await recovery.listRestorableOriginals(mediaId)).map((each) => each.sha256),
++				).toEqual([sha(originalBytes)]);
++				const result = await recovery.restoreMedia(mediaId);
++				expect(result).toMatchObject({
++					ok: true,
++					receipt: { kind: "restore", candidateSha256: sha(originalBytes) },
++				});
++				if (!result.ok) return;
++				expect(
++					await recovery.restoreMedia(mediaId, { operationId: result.receipt.operationId }),
++				).toEqual({ ...result, replayed: true });
++				expect((await recovery.reconcile()).operations).toEqual([]);
++			} finally {
++				await recovery.close();
++			}
++			db = open();
++			await expectServing(originalBytes);
++			expect((await row())!.alt).toBe("Edited alt");
++		});
++
++		it("is fenced: a stale expected revision conflicts and a deleted item is not recreated", async () => {
++			const recovery = await openSafeMediaRecovery(paths());
++			try {
++				expect(
++					await recovery.restoreMedia(mediaId, {
++						expectedRevisionId: baselineId,
++						originalSha256: sha(originalBytes),
++					}),
++				).toMatchObject({ ok: false, code: "CONFLICT" });
++				await expectServing(optimized);
++				await new MediaRepository(db).delete(mediaId);
++				expect(await recovery.restoreMedia(mediaId)).toMatchObject({ ok: false, code: "CONFLICT" });
++				expect(
++					await recovery.restoreMedia(mediaId, { expectedRevisionId: optimizedRevisionId }),
++				).toMatchObject({ ok: false, code: "CONFLICT" });
++			} finally {
++				await recovery.close();
++			}
++			expect(await row()).toBeUndefined();
++		});
++
++		it("refuses a missing database without creating one, and a database without the records", async () => {
++			const missing = join(root, "missing.db");
++			await expect(openSafeMediaRecovery({ ...paths(), databasePath: missing })).rejects.toThrow(
++				SafeMediaRecoveryError,
++			);
++			expect(existsSync(missing)).toBe(false);
++			const bare = join(root, "bare.db");
++			const empty = new Kysely<Database>({
++				dialect: new SqliteDialect({ database: openNodeSqliteDatabase(bare) }),
++			});
++			await empty.schema.createTable("t").addColumn("x", "text").execute();
++			await empty.destroy();
++			await expect(openSafeMediaRecovery({ ...paths(), databasePath: bare })).rejects.toThrow(
++				/migration 092/,
++			);
++		});
++	});
++});
+diff --git a/packages/core/tsdown.config.ts b/packages/core/tsdown.config.ts
+index 27f27e553b570c9a8e6ee96fe7a9c1b57a8a72b6..d34f9d728cbbfe2d3a6102513031dca62cbd1cee 100644
+--- a/packages/core/tsdown.config.ts
++++ b/packages/core/tsdown.config.ts
+@@ -105,6 +105,8 @@ export default defineConfig({
+ 		// Media providers
+ 		"src/media/index.ts",
+ 		"src/media/local-runtime.ts",
++		// Safe media recovery, usable without the runtime or any plugin
++		"src/media/safe/recovery.ts",
+ 		// Image-endpoint helpers (portable) + the Node image endpoint
+ 		"src/media/image-endpoint.ts",
+ 		"src/astro/image-endpoint.ts",
