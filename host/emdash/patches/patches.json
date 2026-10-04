@@ -108,6 +108,155 @@
         "M\tpackages/core/tests/unit/media/safe/replacement-service.test.ts",
         "A\tpackages/core/tests/unit/media/safe/safe-media-integration.test.ts"
       ]
+    },
+    {
+      "name": "0005-interrupted-operation-reconciliation.patch",
+      "tasks": [
+        "2.5"
+      ],
+      "scope": "Reconciliation of the staged replacement protocol through `MediaReplacementService.reconcile`: interrupted operations whose candidate is durably staged are completed through the same fenced steps (or rejected if the media changed or was deleted), operations still at intent are aborted as `INTERRUPTED`, and candidate objects, private originals and temporary files that no record needs are removed. Run after startup and on each maintenance tick when `safeMedia` is set. Exercised with a file-backed SQLite database, real local storage and simulated process death after each of the seven steps and during reconciliation itself, checking that the media is one complete, readable revision afterwards.",
+      "limits": "Node/SQLite and local storage only; the calls after startup and on maintenance ticks are wired but not exercised by a test, only the entry point they call; D1 and other storage adapters are not supported. One writing process is assumed: the locks are in-process, and work of another process is protected only by a grace period (10 minutes by default). Crash points are simulated by abandoning work in-process; there is no power-loss or filesystem-fault testing. Superseded revisions, retained originals and the journal are never pruned. Unpublished candidate revision rows are kept as records after their objects are removed.",
+      "sha256": "f4995a9ecb3c16915ccb93466361b7f6d83c11acdbe67eb46b321ffc1c39ce67",
+      "resultingTree": "0e435015b287be595081ad460db1a77016f573cd",
+      "files": [
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/emdash-runtime.ts",
+        "A\tpackages/core/src/media/safe/keyed-lock.ts",
+        "M\tpackages/core/src/media/safe/private-local.ts",
+        "M\tpackages/core/src/media/safe/private-originals.ts",
+        "A\tpackages/core/src/media/safe/reconciliation.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/runtime.ts",
+        "A\tpackages/core/tests/unit/media/safe/reconciliation.test.ts"
+      ]
+    },
+    {
+      "name": "0006-byte-exact-restore.patch",
+      "tasks": [
+        "2.6"
+      ],
+      "scope": "Fenced byte-exact restore through `MediaReplacementService.restore` and `listRestorableOriginals`: a retained original of the same media item is published against an expected current revision through the same journal, receipt and commit point, idempotent per operation ID; current editorial metadata is kept (the focal point only while dimensions are unchanged), byte-derived metadata describes the restored bytes, and the bytes it replaces are retained in turn. An independent recovery entry point (`openSafeMediaRecovery`, exported as `emdash/media/safe-recovery`) opens the database and storage directories directly, without the runtime, plugins or an image decoder, and lists, restores by media ID and reconciles. Exercised with a file-backed SQLite database and real local storage: restored bytes match the original digest, a stale restore conflicts without staging anything, deletion is never undone, interruptions after each step resume or reconcile to one publication, and missing or corrupt originals publish nothing.",
+      "limits": "Node/SQLite and local storage only; D1 is not supported. Restore is not exposed through any route, bridge or native plugin API yet (task 3.1), and there is no CLI command: the recovery entry point is a function. Restore does not decode the original; it relies on the digest match with bytes the site served before. Reconcile through the recovery entry point only while the site is stopped, because its locks cover one process. Cache refresh after a restore is not measured (task 3.2).",
+      "sha256": "1587539dd817c474112c2de18781906ae0cf10ba02ff2721aab0596cd9cad560",
+      "resultingTree": "05d0f1faedb6e3c2f7bd8c4c47901a0f05c010c1",
+      "files": [
+        "M\tpackages/core/package.json",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "A\tpackages/core/src/media/safe/recovery.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/validate-output.ts",
+        "A\tpackages/core/tests/unit/media/safe/restore.test.ts",
+        "M\tpackages/core/tsdown.config.ts"
+      ]
+    },
+    {
+      "name": "0007-native-safe-media-access.patch",
+      "tasks": [
+        "3.1-native"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/plugins/define-plugin.test.ts",
+        "packages/core/tests/unit/plugins/adapt-sandbox-entry.test.ts",
+        "packages/core/tests/unit/plugins/standard-format.test.ts",
+        "packages/core/tests/unit/plugins/manifest-schema.test.ts",
+        "packages/core/tests/integration/plugins/media-capabilities.test.ts"
+      ],
+      "scope": "Native safe-media access: `ctx.media.safe` for native plugins (built with `definePlugin()`) that declare the native-only capability `media:bytes:replace`, on hosts with `safeMedia` configured. It offers `support()` (protocol 1 and a host profile derived from the configured database and storage descriptors and the running runtime), `revision(mediaId)`, `replace(request)` with geometry forced to `unchanged`, `restore(request)`, `listRestorableOriginals(mediaId)` and `operation(mediaId, operationId)`. Operations are recorded as created by `plugin:<id>`; a plugin cannot read or reuse another caller's operation IDs. The capability is outside the shared manifest vocabulary, so registry and marketplace manifests, the sandboxed-format adapter and `plugins`/`sandboxed` configuration of standard-format plugins reject it. Exercised with a file-backed SQLite database and real local storage: replace and restore with receipts, replay of an operation ID, a stale expected revision, a refused geometry change, and no access for native plugins without the capability, in-process sandboxed-format plugins and hosts without `safeMedia`, both through the context factory and through a runtime plugin route.",
+      "limits": "Pilot only: Node, SQLite and local storage; D1 and object storage are not supported, and the reported profile is a description, not a qualification. No bridge exists for sandboxed plugins (isolated sandboxes receive no safe-media operations at all), and no route or CSRF-protected admin surface is added. The capability name, the `ctx.media.safe` shape and protocol version 1 are provisional. Nativeness is decided by construction: only `definePlugin()` sets the grant, so in-process code that is already trusted could forge it; this is not an isolation boundary. The operation-ownership check runs before the service call, so two callers racing on the same new operation ID with an identical request may share a receipt. The configuration check in the Astro integration is tested through its helper, not through a full build. The native capability is kept out of `ResolvedPlugin.capabilities`, so places that list a plugin's capabilities do not show it.",
+      "sha256": "4eb22867d3577d3469b71d4e66b5d7daefc6621409f116c73c9c4c758b9551b0",
+      "resultingTree": "49310725f2338bca145a5db2e1f3eea686d96565",
+      "files": [
+        "M\tpackages/core/src/astro/integration/index.ts",
+        "M\tpackages/core/src/emdash-runtime.ts",
+        "M\tpackages/core/src/index.ts",
+        "A\tpackages/core/src/media/safe/plugin-access.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/runtime.ts",
+        "M\tpackages/core/src/plugins/adapt-sandbox-entry.ts",
+        "M\tpackages/core/src/plugins/context.ts",
+        "M\tpackages/core/src/plugins/define-plugin.ts",
+        "M\tpackages/core/src/plugins/index.ts",
+        "A\tpackages/core/src/plugins/native-capabilities.ts",
+        "M\tpackages/core/src/plugins/types.ts",
+        "A\tpackages/core/tests/integration/runtime/plugin-safe-media.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/native-access.test.ts"
+      ]
+    },
+    {
+      "name": "0008-read-retained-original.patch",
+      "tasks": [
+        "3.1-native-read"
+      ],
+      "scope": "Private read of a retained original: `ctx.media.safe.readOriginal(mediaId, sha256, { maxBytes })` for the same native plugins and hosts as `0007`. It returns the bytes of an original retained by a published operation on that media item (one listed by `listRestorableOriginals`), verified against `sha256` and the recorded size, with its MIME type and size, as a typed result. It refuses malformed input (`INVALID_REQUEST`), missing, deleted or unready media, also when deleted during the read (`MEDIA_UNAVAILABLE`), another item's original, an unknown digest or the active revision's digest (`NO_ORIGINAL`), a recorded size over the limit without reading (`TOO_LARGE`), a missing stored object (`ORIGINAL_MISSING`), a stored object that does not match its digest or recorded size (`ORIGINAL_CORRUPT`, read only up to the recorded size) and unreadable private storage (`ORIGINAL_UNREADABLE`, retryable). The limit defaults to and may not exceed those of `ctx.media.readBytes` (10 MiB and 16 MiB). The read writes nothing: it takes no lock, creates no baseline revision, writes no journal entry and returns no URL or storage key. Exercised with a file-backed SQLite database and real local storage, comparing every record, every stored object and its modification time before and after, and with no access for native plugins without the capability, in-process sandboxed-format plugins and hosts without `safeMedia`, through the context factory and a runtime plugin route.",
+      "limits": "Pilot only: Node, SQLite and local storage; D1 and object storage are not supported. Native plugins only; there is no bridge for sandboxed plugins and no route. Originals larger than 16 MiB cannot be read through this method. The bytes are held in memory in full, like `readBytes`; there is no streaming read. Media deleted after the read completes is not detected, and identical bytes retained for two media items are one content-addressed original, readable through either item. Reads are not attributed or logged. The method name and result shape are provisional, like the rest of protocol 1.",
+      "sha256": "f388f185ef2b7536fa740ec5a152db3bc6a20bbf823060a4c832a2ce01f57e71",
+      "resultingTree": "fe704b4f92e0ed8a9dd343487f1cd118ba193b62",
+      "files": [
+        "M\tpackages/core/src/index.ts",
+        "M\tpackages/core/src/media/safe/plugin-access.ts",
+        "M\tpackages/core/src/media/safe/private-originals.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/plugins/index.ts",
+        "M\tpackages/core/src/plugins/native-capabilities.ts",
+        "M\tpackages/core/src/plugins/types.ts",
+        "M\tpackages/core/tests/integration/runtime/plugin-safe-media.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/read-original.test.ts"
+      ]
+    },
+    {
+      "name": "0009-decoder-process-cleanup.patch",
+      "tasks": [
+        "2.2"
+      ],
+      "scope": "Decoder child-process cleanup for the output validator: a timed-out decode, or a spawn observer that throws, reports only after the child has been killed and reaped, and a decoder child exits when its parent dies (IPC disconnect) instead of being orphaned. The child flushes its reply before exiting. Exercised on Node with real child processes, including a hung stub decoder whose parent is killed.",
+      "limits": "Covers the Sharp child-process decoder only. Parent death is detected through the IPC channel; a parent stopped with SIGSTOP or a child that blocks the event loop inside libvips is still bounded only by the wall-time kill. Node only; no workerd, Postgres or D1 run.",
+      "sha256": "49f44ddd3ea7071fe1e4fe8f728165598680e4ba892e54e86f376b5236c5f97b",
+      "resultingTree": "906f7d0cb627dbf78c99be5f5b8a06caf09e45b0",
+      "files": [
+        "M\tpackages/core/src/media/safe/sharp-child-decoder.ts",
+        "A\tpackages/core/tests/unit/media/safe/decoder-lifecycle.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/output-validation.test.ts"
+      ]
+    },
+    {
+      "name": "0010-public-active-revision.patch",
+      "tasks": [
+        "2.1-public-baseline"
+      ],
+      "relatedTests": [
+        "packages/core/tests/unit/storage/local.test.ts",
+        "packages/core/tests/integration/astro/media-asset-route.test.ts",
+        "packages/core/tests/integration/astro/media-asset-auth.test.ts"
+      ],
+      "scope": "Public storage after publication. Once a replacement or restore is published, the host rewrites the media item's stable key with the active revision's bytes (temporary file, flush, rename) and removes the superseded revision object, each only after the bytes it displaces are verified by SHA-256 in the private original store and recorded there; a missing or damaged private copy is rewritten from the public bytes first, and bytes at a stable key that no record names are retained and recorded before they are overwritten. Migration 093 adds `public_cleaned_at` to the operation journal: a published operation without it owes this cleanup, which reconciliation finishes after an interruption and performs, a bounded number per run, for media replaced before this patch. Reconciliation also removes any revision object that is no item's active revision once its bytes are verified as a recorded original, including the last revision of deleted media, and stale temporary files of interrupted rewrites. Host readers are unaffected by the cleanup: they resolve the active revision's own object, a reader that resolved a revision just before it was superseded resolves again instead of reporting a missing file, and the local storage opens a file before reporting its size so an open read completes in full when the key is renamed over or removed. Restore, `readOriginal` and `listRestorableOriginals` read the private store. Exercised with a file-backed SQLite database and real local storage: replace, restore, second replace and deletion with a scan of every file in the public directory for retained originals that are not active; process death at each new step followed by reconciliation; a damaged, missing and unwritable private store; a damaged active revision; media deleted during the rewrite; a shared storage key; and readers racing a supersession through the storage wrapper and the public file route.",
+      "limits": "Pilot only: Node, SQLite and local storage; D1 and object storage are not supported, and no deployment that serves the storage directory directly was run. The rewrite follows the commit, so between the commit and the rewrite (or until reconciliation after an interruption or a failed rewrite, which can be up to the grace period plus a maintenance interval) the stable key still holds the previous bytes, which on a first replacement are the original; the cleanup is not part of the publication's transaction. A reader that bypasses the host sees the previous or the new file in full, but its caches are not invalidated. Locks cover one process: two processes publishing on one item at the same moment can leave the stable key one revision behind, and nothing re-checks a stable key once its operation is marked clean, so a later external write to it is not detected. A stable key shared by more than one media row is never rewritten and keeps its original bytes. Revision objects that were never retained (for example the optimized output of deleted media) are kept. An operation whose cleanup keeps failing is retried on every run and counted as pending; more than `limit` of them delay the rest. The temporary file is created under `media-revisions/` in the storage directory, which must be on the same filesystem as the stable keys. A service constructed without the atomic writer falls back to the storage's own upload, which is not atomic on local storage; the runtime and the recovery entry point always configure it. Without this patch's migration and reconciliation having run to completion, a rollback to an unpatched host can still serve an original at a stable key; database rollback is not covered.",
+      "sha256": "7a7fcc4e82631657e4a1773e7e7a4692e5dfa3935fac8ec57542be1c311b485d",
+      "resultingTree": "90f5be2d7b18659a7a79998f69d694600cbe20e5",
+      "files": [
+        "M\tpackages/core/src/astro/routes/api/media/file/[...key].ts",
+        "A\tpackages/core/src/database/migrations/093_safe_media_public_cleanup.ts",
+        "M\tpackages/core/src/database/migrations/runner.ts",
+        "M\tpackages/core/src/database/repositories/media-operations.ts",
+        "M\tpackages/core/src/database/types.ts",
+        "A\tpackages/core/src/media/safe/public-local.ts",
+        "A\tpackages/core/src/media/safe/public-objects.ts",
+        "M\tpackages/core/src/media/safe/reconciliation.ts",
+        "M\tpackages/core/src/media/safe/recovery.ts",
+        "M\tpackages/core/src/media/safe/replacement-service.ts",
+        "M\tpackages/core/src/media/safe/resolve-object.ts",
+        "M\tpackages/core/src/media/safe/revision-keys.ts",
+        "M\tpackages/core/src/media/safe/runtime.ts",
+        "M\tpackages/core/src/storage/local.ts",
+        "A\tpackages/core/tests/unit/database/migrations/093_safe_media_public_cleanup.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/native-access.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/public-objects.test.ts",
+        "A\tpackages/core/tests/unit/media/safe/public-scan.ts",
+        "M\tpackages/core/tests/unit/media/safe/reconciliation.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/replacement-service.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/restore.test.ts",
+        "M\tpackages/core/tests/unit/media/safe/safe-media-integration.test.ts",
+        "M\tpackages/core/tests/unit/storage/local.test.ts"
+      ]
     }
   ]
 }
